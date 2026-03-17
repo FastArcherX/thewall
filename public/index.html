@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>The Wall</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.5.2/css/all.min.css" />
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+
+  <!-- LOGIN SCREEN -->
+  <div id="login-screen" class="screen">
+    <div class="login-box">
+      <h1>The Wall</h1>
+      <p class="login-sub">Your shared memory walls</p>
+      <form id="login-form">
+        <input type="text" id="login-name" placeholder="Username" autocomplete="username" required />
+        <input type="password" id="login-password" placeholder="Password" autocomplete="current-password" required />
+        <button type="submit">Log in</button>
+        <p id="login-error" class="error-msg"></p>
+      </form>
+    </div>
+  </div>
+
+  <!-- MAIN APP -->
+  <div id="app-screen" class="screen hidden">
+
+    <!-- SIDEBAR -->
+    <aside id="sidebar">
+      <div class="sidebar-header">
+        <span id="user-greeting">Hello!</span>
+        <div class="sidebar-header-actions">
+          <button id="change-name-btn" title="Change nickname" aria-label="Change nickname"><i class="fa-solid fa-user-pen"></i></button>
+          <button id="change-password-btn" title="Change password" aria-label="Change password"><i class="fa-solid fa-key"></i></button>
+          <button id="logout-btn" title="Log out" aria-label="Log out"><i class="fa-solid fa-right-from-bracket"></i></button>
+        </div>
+      </div>
+      <div class="sidebar-section">
+        <ul id="favourites-list"></ul>
+        <h3>Shared Walls</h3>
+        <ul id="walls-list"></ul>
+        <button id="new-wall-btn"><i class="fa-solid fa-plus"></i><span>New Wall</span></button>
+      </div>
+    </aside>
+
+    <!-- MAIN CONTENT -->
+    <main id="main-content">
+      <div id="empty-state">
+        <div class="empty-icon"><i class="fa-regular fa-images"></i></div>
+        <p>Select a wall from the sidebar or create a new one.</p>
+      </div>
+
+      <div id="wall-view" class="hidden">
+        <div id="wall-header">
+          <div>
+            <h2 id="wall-title"></h2>
+            <p id="wall-meta"></p>
+          </div>
+          <div id="wall-actions">
+            <button id="edit-access-btn" title="Edit wall access" aria-label="Edit wall access"><i class="fa-solid fa-user-group"></i></button>
+            <button id="change-icon-btn" title="Change wall icon" aria-label="Change wall icon"><i class="fa-solid fa-icons"></i></button>
+            <button id="rename-wall-btn" title="Rename wall" aria-label="Rename wall"><i class="fa-solid fa-pen"></i></button>
+            <button id="delete-wall-btn" title="Delete wall" aria-label="Delete wall"><i class="fa-solid fa-trash"></i></button>
+          </div>
+        </div>
+
+        <!-- UPLOAD AREA -->
+        <div id="upload-area">
+          <label id="upload-label" for="file-input">
+            <span><i class="fa-solid fa-cloud-arrow-up"></i> Click or drop files here to preview before uploading</span>
+            <input type="file" id="file-input" accept="image/*,video/*,.gif,.ico" multiple />
+          </label>
+          <input type="text" id="caption-input" placeholder="Caption for selected files (optional)" />
+          <div id="caption-mention-menu" class="hidden"></div>
+          <button id="upload-btn" disabled><i class="fa-solid fa-upload"></i><span>Upload</span></button>
+          <div id="upload-progress" class="hidden">
+            <div id="upload-bar"></div>
+            <span id="upload-percent">0%</span>
+          </div>
+          <div id="upload-preview" class="hidden"></div>
+          <div id="search-area">
+            <div class="filter-field search-field">
+              <i class="fa-solid fa-magnifying-glass filter-icon"></i>
+              <input type="text" id="search-input" placeholder="Search in title and caption" />
+            </div>
+            <div class="filter-field">
+              <i class="fa-solid fa-at filter-icon"></i>
+              <i class="fa-solid fa-chevron-down filter-caret" aria-hidden="true"></i>
+              <select id="filter-mention">
+                <option value="">Ping: all</option>
+              </select>
+            </div>
+            <div class="filter-field">
+              <i class="fa-solid fa-user filter-icon"></i>
+              <i class="fa-solid fa-chevron-down filter-caret" aria-hidden="true"></i>
+              <select id="filter-publisher">
+                <option value="">Publisher: all</option>
+              </select>
+            </div>
+            <div class="filter-field">
+              <i class="fa-solid fa-filter filter-icon"></i>
+              <i class="fa-solid fa-chevron-down filter-caret" aria-hidden="true"></i>
+              <select id="filter-type">
+                <option value="">Type: all</option>
+                <option value="video">Video</option>
+                <option value="image">Image</option>
+                <option value="gif">GIF</option>
+                <option value="other">Other</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <!-- MEDIA GRID -->
+        <div id="media-grid"></div>
+      </div>
+    </main>
+  </div>
+
+  <!-- LIGHTBOX -->
+  <div id="lightbox" class="hidden">
+    <button id="lightbox-close" aria-label="Close"><i class="fa-solid fa-xmark"></i></button>
+    <div id="lightbox-content"></div>
+    <p id="lightbox-caption" class="hidden"></p>
+  </div>
+
+  <!-- MODALS -->
+  <div id="modal-overlay" class="hidden">
+    <div id="modal-box">
+      <p id="modal-message"></p>
+      <label id="modal-label-1" class="modal-field-label hidden"></label>
+      <input type="text" id="modal-input" class="hidden" />
+      <label id="modal-label-2" class="modal-field-label hidden"></label>
+      <input type="text" id="modal-input2" class="hidden" />
+      <div id="modal-btns">
+        <button id="modal-confirm">OK</button>
+        <button id="modal-cancel">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="emoji-overlay" class="hidden">
+    <div id="emoji-box">
+      <div class="emoji-header">
+        <div>
+          <h3>Choose a wall icon</h3>
+          <p>Pick one of the available emojis.</p>
+        </div>
+        <button id="emoji-close" type="button" aria-label="Close emoji picker"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      <div id="emoji-grid"></div>
+    </div>
+  </div>
+
+  <div id="info-overlay" class="hidden">
+    <div id="info-box">
+      <div class="info-header">
+        <h3><i class="fa-solid fa-circle-info"></i> File Info</h3>
+        <button id="info-close" type="button" aria-label="Close"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      <div id="info-content"></div>
+    </div>
+  </div>
+
+  <script src="/js/app.js"></script>
+</body>
+</html>
