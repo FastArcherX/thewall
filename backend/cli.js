@@ -26,7 +26,7 @@ The Wall - Admin CLI
   op add "<name>"                        Add user to operator list
   op remove "<name>"                     Remove user from operator list
   op list                                List operators
-  update                                 Update tracked files from origin/main
+  update                                 Update tracked files from GitHub
   wall add "<name>"                      Add a new wall
   wall remove "<name>"                   Remove a wall
   wall edit "<name>" "<new name>"        Rename a wall
@@ -384,23 +384,6 @@ async function executeOperatorCommand(tokens) {
   return { handled: true, success: false };
 }
 
-function runGit(args, options = {}) {
-  if (!hasGitMetadata()) {
-    throw new Error('Git metadata not available in this environment.');
-  }
-
-  return execFileSync('git', args, {
-    cwd: REPO_ROOT,
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-    ...options
-  }).trim();
-}
-
-function hasGitMetadata() {
-  return fs.existsSync(path.join(REPO_ROOT, '.git'));
-}
-
 function downloadBuffer(url) {
   return fetch(url, {
     headers: {
@@ -443,35 +426,14 @@ async function executeUpdateCommand(tokens, options = {}) {
   try {
     const confirm = options.confirm || (async () => false);
 
-    if (hasGitMetadata()) {
-      const currentHead = runGit(['rev-parse', 'HEAD']);
-      runGit(['fetch', 'origin', UPDATE_BRANCH]);
-      const remoteHead = runGit(['rev-parse', `origin/${UPDATE_BRANCH}`]);
-
-      if (currentHead === remoteHead) {
-        console.log('The Wall is already up to date.');
-        return { handled: true, success: true };
-      }
-
-      const approved = await confirm(`Update tracked files from ${UPDATE_REPO_URL}? This preserves uploads and data.json. [y/N] `);
-      if (!approved) {
-        console.log('Update cancelled.');
-        return { handled: true, success: false };
-      }
-
-      runGit(['restore', '--source', `origin/${UPDATE_BRANCH}`, '--worktree', '--staged', '--', '.']);
-      console.log('Update completed.');
-      return { handled: true, success: true };
-    }
-
-    const approved = await confirm(`Git metadata not found. Download latest files from ${UPDATE_REPO_URL}? This preserves uploads and data.json. [y/N] `);
+    const approved = await confirm('Update from GitHub and preserve uploads/data.json? [y/N] ');
     if (!approved) {
       console.log('Update cancelled.');
       return { handled: true, success: false };
     }
 
     await updateFromGitHubArchive();
-    console.log('Update completed from GitHub archive.');
+    console.log('Update completed from GitHub.');
     return { handled: true, success: true };
   } catch (error) {
     console.error(`Update failed: ${error.message}`);
