@@ -9,24 +9,6 @@ const { loadDB, saveDB } = require('./db');
 const { WALL_ICONS, DEFAULT_WALL_ICON, getWallIconById, normalizeWallIcon } = require('./wall-icons');
 
 const UPLOADS_DIR = path.join(__dirname, '..', 'uploads');
-const CANDIDATE_REPO_ROOTS = [__dirname, path.join(__dirname, '..'), process.cwd(), path.dirname(process.argv[1] || '')].filter(Boolean);
-
-function findRepoRoot() {
-  for (const startDir of CANDIDATE_REPO_ROOTS) {
-    let currentDir = path.resolve(startDir);
-    for (;;) {
-      if (fs.existsSync(path.join(currentDir, '.git'))) {
-        return currentDir;
-      }
-      const parentDir = path.dirname(currentDir);
-      if (parentDir === currentDir) break;
-      currentDir = parentDir;
-    }
-  }
-  throw new Error('Unable to locate the repository root.');
-}
-
-const REPO_ROOT = findRepoRoot();
 
 function printHelp() {
   console.log(`
@@ -399,12 +381,35 @@ async function executeOperatorCommand(tokens) {
 }
 
 function runGit(args, options = {}) {
+  const repoRoot = findRepoRoot();
+  if (!repoRoot) {
+    throw new Error('Unable to locate the repository root.');
+  }
+
   return execFileSync('git', args, {
-    cwd: REPO_ROOT,
+    cwd: repoRoot,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
     ...options
   }).trim();
+}
+
+function findRepoRoot() {
+  const candidateRoots = [__dirname, path.join(__dirname, '..'), process.cwd(), path.dirname(process.argv[1] || '')].filter(Boolean);
+
+  for (const startDir of candidateRoots) {
+    let currentDir = path.resolve(startDir);
+    for (;;) {
+      if (fs.existsSync(path.join(currentDir, '.git'))) {
+        return currentDir;
+      }
+      const parentDir = path.dirname(currentDir);
+      if (parentDir === currentDir) break;
+      currentDir = parentDir;
+    }
+  }
+
+  return null;
 }
 
 async function executeUpdateCommand(tokens, options = {}) {
