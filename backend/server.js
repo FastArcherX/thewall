@@ -9,9 +9,11 @@ const { v4: uuidv4 } = require('uuid');
 const { loadDB, saveDB } = require('./db');
 const { executeCommand, printHelp, tokenizeCommand } = require('./cli');
 const { WALL_ICONS, normalizeWallIcon } = require('./wall-icons');
+const appPackage = require('../package.json');
 
 const app = express();
 const PORT = 3000;
+const EVERYONE_WALL_ID = 'wall:everyone';
 
 // Ensure uploads directory exists
 const UPLOADS_DIR = path.join(__dirname, '..', 'uploads');
@@ -29,9 +31,9 @@ const storage = multer.diskStorage({
 const upload = multer({
   storage,
   fileFilter: (req, file, cb) => {
-    const allowed = /image\/(jpeg|jpg|png|gif|webp|avif|bmp|svg\+xml|x-icon|vnd\.microsoft\.icon)|video\/(mp4|webm|ogg|quicktime|x-msvideo|3gpp|avi)/;
+    const allowed = /image\/(jpeg|jpg|png|gif|webp|avif|bmp|svg\+xml|x-icon|vnd\.microsoft\.icon)|video\/(mp4|webm|ogg|quicktime|x-msvideo|3gpp|avi|x-matroska)|audio\/(mpeg|mp3|wav|x-wav)/;
     if (allowed.test(file.mimetype)) cb(null, true);
-    else cb(new Error('Only images and videos are allowed.'));
+    else cb(new Error('Only supported images, videos and audio files are allowed.'));
   }
 });
 
@@ -56,18 +58,26 @@ function getWallById(db, wallId) {
   return db.walls.find(wall => wall.id === wallId);
 }
 
-function serializeWall(wall, currentUser, canManageMeta = false) {
-  const icon = normalizeWallIcon(wall.iconId || wall.icon);
+function isEveryoneWall(wallOrId) {
+  const value = typeof wallOrId === 'string' ? wallOrId : wallOrId?.id;
+  return value === EVERYONE_WALL_ID;
+}
+
+function serializeWall(wall, currentUser, canManageMeta = false, pingCount = 0) {
+  const icon = wall.iconId ? normalizeWallIcon(wall.iconId || wall.icon).emoji : (String(wall.icon || '').trim() || normalizeWallIcon(wall.icon).emoji);
+  const iconId = wall.iconId ? normalizeWallIcon(wall.iconId || wall.icon).id : null;
   return {
     id: wall.id,
     name: wall.name,
-    icon: icon.emoji,
-    iconId: icon.id,
+    icon,
+    iconId,
     owner: wall.owner,
     allowedUsers: normalizeNameList(wall.allowedUsers || []),
     createdAt: wall.createdAt,
     canManageMeta,
-    isFavourites: false
+    isFavourites: false,
+    isEveryone: isEveryoneWall(wall),
+    pingCount: Math.max(0, Number(pingCount || 0))
   };
 }
 
@@ -104,6 +114,7 @@ function isOperator(db, userName) {
 
 function canUserAccessWall(db, wall, userName) {
   if (!wall) return false;
+  if (isEveryoneWall(wall)) return true;
   if (normalizeName(wall.owner) === normalizeName(userName)) return true;
   if (isOperator(db, userName)) return true;
   return (wall.allowedUsers || []).some(name => normalizeName(name) === normalizeName(userName));
@@ -111,8 +122,68 @@ function canUserAccessWall(db, wall, userName) {
 
 function canManageWallMeta(db, wall, userName) {
   if (!wall) return false;
+  if (isEveryoneWall(wall)) return false;
   if (normalizeName(wall.owner) === normalizeName(userName)) return true;
   return isOperator(db, userName);
+}
+
+function extractMentionNames(value) {
+  const text = String(value || '');
+  const matches = text.match(/@([\w.-]+)/g) || [];
+  return new Set(matches.map(match => match.slice(1).toLowerCase()));
+}
+
+function getPingCount(db, userName, wallId) {
+  return (db.notifications || [])
+    .filter(entry => normalizeName(entry.user) === normalizeName(userName) && entry.wallId === wallId)
+    .reduce((sum, entry) => sum + Number(entry.count || 0), 0);
+}
+
+function clearWallPings(db, userName, wallId) {
+  const before = (db.notifications || []).length;
+  db.notifications = (db.notifications || []).filter(entry => !(normalizeName(entry.user) === normalizeName(userName) && entry.wallId === wallId));
+  return db.notifications.length !== before;
+}
+
+function addWallPing(db, userName, wallId) {
+  if (!userName || !wallId) return;
+  db.notifications = db.notifications || [];
+  const entry = db.notifications.find(item => normalizeName(item.user) === normalizeName(userName) && item.wallId === wallId);
+  if (entry) {
+    entry.count = Number(entry.count || 0) + 1;
+    return;
+  }
+  db.notifications.push({ user: userName, wallId, count: 1 });
+}
+
+function notifyMentions(db, wall, actorName, previousCaption, nextCaption) {
+  const before = extractMentionNames(previousCaption);
+  const after = extractMentionNames(nextCaption);
+  const added = Array.from(after).filter(name => !before.has(name));
+  if (added.length === 0) return;
+
+  const recipients = new Set();
+  const actorKey = normalizeName(actorName);
+
+  if (added.includes('everyone')) {
+    (db.users || []).forEach(user => {
+      if (!user?.name) return;
+      if (normalizeName(user.name) === actorKey) return;
+      if (!canUserAccessWall(db, wall, user.name)) return;
+      recipients.add(user.name);
+    });
+  }
+
+  added.forEach(mention => {
+    if (mention === 'everyone') return;
+    const user = findUserByName(db, mention);
+    if (!user?.name) return;
+    if (normalizeName(user.name) === actorKey) return;
+    if (!canUserAccessWall(db, wall, user.name)) return;
+    recipients.add(user.name);
+  });
+
+  recipients.forEach(userName => addWallPing(db, userName, wall.id));
 }
 
 function parseAllowedUsers(values) {
@@ -151,7 +222,9 @@ function serializeFavouritesWall(currentUser) {
     owner: currentUser,
     createdAt: null,
     canManageMeta: false,
-    isFavourites: true
+    isFavourites: true,
+    isEveryone: false,
+    pingCount: 0
   };
 }
 
@@ -273,6 +346,10 @@ app.get('/api/wall-icons', (req, res) => {
   res.json(WALL_ICONS);
 });
 
+app.get('/api/version', (req, res) => {
+  res.json({ version: appPackage.version });
+});
+
 app.patch('/api/profile', requireAuth, async (req, res) => {
   const { name, newPassword, currentPassword } = req.body;
   if (!currentPassword) return res.status(400).json({ error: 'Current password is required' });
@@ -314,6 +391,10 @@ app.patch('/api/profile', requireAuth, async (req, res) => {
     db.operators = (db.operators || []).map(entry =>
       normalizeName(entry) === normalizeName(previousName) ? nextName : entry
     );
+    db.notifications = (db.notifications || []).map(entry => ({
+      ...entry,
+      user: normalizeName(entry.user) === normalizeName(previousName) ? nextName : entry.user
+    }));
     req.session.user.name = nextName;
   }
 
@@ -331,7 +412,17 @@ app.get('/api/walls', requireAuth, (req, res) => {
   const db = loadDB();
   const regularWalls = db.walls
     .filter(wall => canUserAccessWall(db, wall, req.session.user.name))
-    .map(wall => serializeWall(wall, req.session.user.name, canManageWallMeta(db, wall, req.session.user.name)));
+    .sort((a, b) => {
+      if (isEveryoneWall(a) && !isEveryoneWall(b)) return -1;
+      if (!isEveryoneWall(a) && isEveryoneWall(b)) return 1;
+      return 0;
+    })
+    .map(wall => serializeWall(
+      wall,
+      req.session.user.name,
+      canManageWallMeta(db, wall, req.session.user.name),
+      getPingCount(db, req.session.user.name, wall.id)
+    ));
   res.json([serializeFavouritesWall(req.session.user.name), ...regularWalls]);
 });
 
@@ -375,6 +466,9 @@ app.delete('/api/walls/:wallId', requireAuth, (req, res) => {
   if (isUserFavouritesWallId(req.params.wallId, req.session.user.name)) {
     return res.status(403).json({ error: 'Favourites wall cannot be deleted' });
   }
+  if (isEveryoneWall(req.params.wallId)) {
+    return res.status(403).json({ error: '@everyone wall cannot be deleted' });
+  }
 
   const db = loadDB();
   const idx = db.walls.findIndex(w => w.id === req.params.wallId);
@@ -391,6 +485,7 @@ app.delete('/api/walls/:wallId', requireAuth, (req, res) => {
   db.favourites.forEach(entry => {
     entry.items = entry.items.filter(ref => ref.wallId !== req.params.wallId);
   });
+  db.notifications = (db.notifications || []).filter(entry => entry.wallId !== req.params.wallId);
   db.walls.splice(idx, 1);
   saveDB(db);
   res.json({ success: true });
@@ -399,6 +494,9 @@ app.delete('/api/walls/:wallId', requireAuth, (req, res) => {
 app.patch('/api/walls/:wallId', requireAuth, (req, res) => {
   if (isUserFavouritesWallId(req.params.wallId, req.session.user.name)) {
     return res.status(403).json({ error: 'Favourites wall cannot be edited' });
+  }
+  if (isEveryoneWall(req.params.wallId)) {
+    return res.status(403).json({ error: '@everyone wall cannot be edited' });
   }
 
   const { name, icon, iconId } = parseWallPayload(req.body);
@@ -421,6 +519,9 @@ app.patch('/api/walls/:wallId', requireAuth, (req, res) => {
 app.patch('/api/walls/:wallId/access', requireAuth, (req, res) => {
   if (isUserFavouritesWallId(req.params.wallId, req.session.user.name)) {
     return res.status(403).json({ error: 'Favourites wall cannot be edited' });
+  }
+  if (isEveryoneWall(req.params.wallId)) {
+    return res.status(403).json({ error: '@everyone wall access is fixed for all users' });
   }
 
   if (!Array.isArray(req.body?.allowedUsers)) {
@@ -542,6 +643,10 @@ app.get('/api/walls/:wallId/items', requireAuth, (req, res) => {
     return res.status(403).json({ error: 'Access denied to this wall' });
   }
 
+  if (clearWallPings(db, req.session.user.name, wall.id)) {
+    saveDB(db);
+  }
+
   const entry = getUserFavouritesEntry(db, req.session.user.name);
   const favouriteKeys = new Set((entry?.items || []).map(getFavouriteRefKey));
   const items = wall.items.map(item => ({
@@ -580,6 +685,7 @@ app.post('/api/walls/:wallId/items', requireAuth, upload.single('file'), (req, r
     uploadedBy: req.session.user.name
   };
   wall.items.push(item);
+  notifyMentions(db, wall, req.session.user.name, '', item.caption || '');
   saveDB(db);
   res.json(item);
 });
@@ -672,9 +778,13 @@ app.patch('/api/walls/:wallId/items/:itemId', requireAuth, (req, res) => {
   }
   const item = wall.items.find(i => i.id === req.params.itemId);
   if (!item) return res.status(404).json({ error: 'Item not found' });
+  const previousCaption = item.caption || '';
   if (typeof caption === 'string') item.caption = caption;
   if (typeof originalName === 'string' && originalName.trim()) {
     item.originalName = sanitizeUploadDisplayName(originalName.trim(), item.originalName);
+  }
+  if (typeof caption === 'string') {
+    notifyMentions(db, wall, req.session.user.name, previousCaption, item.caption || '');
   }
   saveDB(db);
   res.json({ success: true });

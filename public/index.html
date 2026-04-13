@@ -45,6 +45,7 @@
         <ul id="walls-list"></ul>
         <button id="new-wall-btn"><i class="fa-solid fa-plus"></i><span>New Wall</span></button>
       </div>
+      <div id="sidebar-footer"></div>
     </aside>
 
     <!-- MAIN CONTENT -->
@@ -72,11 +73,12 @@
         <div id="upload-area">
           <label id="upload-label" for="file-input">
             <span><i class="fa-solid fa-cloud-arrow-up"></i> Click or drop files here to preview before uploading</span>
-            <input type="file" id="file-input" accept="image/*,video/*,.gif,.ico" multiple />
+            <input type="file" id="file-input" accept="image/*,video/*,audio/*,.gif,.ico,.mp3,.mp4,.mkv,.wav" multiple />
           </label>
           <input type="text" id="caption-input" placeholder="Caption for selected files (optional)" />
           <div id="caption-mention-menu" class="hidden"></div>
           <button id="upload-btn" disabled><i class="fa-solid fa-upload"></i><span>Upload</span></button>
+          <button id="upload-cancel-btn" class="hidden" type="button"><i class="fa-solid fa-xmark"></i><span>Cancel</span></button>
           <div id="upload-progress" class="hidden">
             <div id="upload-bar"></div>
             <span id="upload-percent">0%</span>
@@ -107,9 +109,9 @@
               <select id="filter-type">
                 <option value="">Type: all</option>
                 <option value="video">Video</option>
+                <option value="audio">Audio</option>
                 <option value="image">Image</option>
                 <option value="gif">GIF</option>
-                <option value="other">Other</option>
               </select>
             </div>
           </div>
@@ -165,6 +167,10 @@
       <div id="info-content"></div>
     </div>
   </div>
+
+  <button id="sound-toggle-btn" type="button" aria-label="Toggle sound" title="Sound on">
+    <i class="fa-solid fa-volume-high"></i>
+  </button>
 
   <script src="/js/app.js"></script>
 </body>

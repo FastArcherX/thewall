@@ -17,6 +17,7 @@ const mentionState = {
 };
 let activeMentionInput = null;
 const mentionBoundInputs = new WeakSet();
+const EVERYONE_MENTION = 'everyone';
 const reorderState = {
   sourceEl: null,
   placeholderEl: null,
@@ -67,11 +68,13 @@ const filterMention = document.getElementById('filter-mention');
 const filterPublisher = document.getElementById('filter-publisher');
 const filterType = document.getElementById('filter-type');
 const uploadBtn = document.getElementById('upload-btn');
+const uploadCancelBtn = document.getElementById('upload-cancel-btn');
 const uploadLabel = document.getElementById('upload-label');
 const uploadPreview = document.getElementById('upload-preview');
 const uploadProgress = document.getElementById('upload-progress');
 const uploadBar = document.getElementById('upload-bar');
 const uploadPercent = document.getElementById('upload-percent');
+const sidebarFooter = document.getElementById('sidebar-footer');
 const mediaGrid = document.getElementById('media-grid');
 const lightbox = document.getElementById('lightbox');
 const lightboxClose = document.getElementById('lightbox-close');
@@ -93,6 +96,18 @@ const emojiClose = document.getElementById('emoji-close');
 const infoOverlay = document.getElementById('info-overlay');
 const infoClose = document.getElementById('info-close');
 const infoContent = document.getElementById('info-content');
+const soundToggleBtn = document.getElementById('sound-toggle-btn');
+
+const uploadState = {
+  inProgress: false,
+  cancelRequested: false,
+  currentXhr: null,
+  totalBytes: 0,
+  uploadedBytes: 0
+};
+
+let appVersion = '';
+let soundEnabled = true;
 
 const operaInjectedSelectors = [
   '#detach-button-host',
@@ -118,6 +133,34 @@ function initOperaOverlayBlocker() {
   observer.observe(document.documentElement, {
     childList: true,
     subtree: true
+  });
+}
+
+function applySoundStateToMedia() {
+  const muted = !soundEnabled;
+  document.querySelectorAll('#media-grid video, #media-grid audio, #lightbox-content video, #lightbox-content audio').forEach(media => {
+    media.muted = muted;
+  });
+}
+
+function updateSoundToggleUI() {
+  if (!soundToggleBtn) return;
+  soundToggleBtn.classList.toggle('is-muted', !soundEnabled);
+  soundToggleBtn.title = soundEnabled ? 'Sound on' : 'Sound muted';
+  soundToggleBtn.setAttribute('aria-label', soundEnabled ? 'Mute sound' : 'Unmute sound');
+  soundToggleBtn.innerHTML = soundEnabled
+    ? '<i class="fa-solid fa-volume-high"></i>'
+    : '<i class="fa-solid fa-volume-xmark"></i>';
+}
+
+function initSoundToggle() {
+  updateSoundToggleUI();
+  applySoundStateToMedia();
+  if (!soundToggleBtn) return;
+  soundToggleBtn.addEventListener('click', () => {
+    soundEnabled = !soundEnabled;
+    updateSoundToggleUI();
+    applySoundStateToMedia();
   });
 }
 
@@ -240,6 +283,15 @@ function extractMentions(value) {
   return Array.from(new Set(matches.map(match => match.slice(1).toLowerCase())));
 }
 
+function getMentionSuggestionUsers() {
+  const baseUsers = Array.from(new Set((mentionUsers || []).map(name => String(name || '').trim()).filter(Boolean)));
+  const lower = new Set(baseUsers.map(name => name.toLowerCase()));
+  if (!lower.has(EVERYONE_MENTION)) {
+    baseUsers.unshift(EVERYONE_MENTION);
+  }
+  return baseUsers;
+}
+
 function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -268,7 +320,7 @@ function formatTextHtml(value, { highlightTerm = '', mentionAware = false, highl
   const text = String(value || '');
   if (!mentionAware) return highlightPlainText(text, highlightTerm);
 
-  const users = new Set(mentionUsers.map(name => name.toLowerCase()));
+  const users = new Set([...mentionUsers.map(name => name.toLowerCase()), EVERYONE_MENTION]);
   const mentionToHighlight = String(highlightedMention || '').toLowerCase();
   const mentionRegex = /@([\w.-]+)/g;
   let html = '';
@@ -297,9 +349,11 @@ function formatTextHtml(value, { highlightTerm = '', mentionAware = false, highl
 }
 
 function getItemType(mimetype) {
-  if (String(mimetype || '').startsWith('video/')) return 'video';
+  const type = String(mimetype || '').toLowerCase();
+  if (type.startsWith('audio/')) return 'audio';
+  if (type.startsWith('video/')) return 'video';
   if (mimetype === 'image/gif') return 'gif';
-  if (String(mimetype || '').startsWith('image/')) return 'image';
+  if (type.startsWith('image/')) return 'image';
   return 'other';
 }
 
@@ -841,6 +895,7 @@ async function api(method, url, body) {
 
 async function init() {
   initOperaOverlayBlocker();
+  initSoundToggle();
   initCustomFilterSelects();
   try {
     await loadWallIcons();
@@ -865,8 +920,22 @@ async function showApp() {
   loginScreen.classList.add('hidden');
   appScreen.classList.remove('hidden');
   userGreeting.textContent = `Hello, ${currentUser}`;
+  await loadAppVersion();
   await loadMentionUsers();
   await loadWalls();
+}
+
+async function loadAppVersion() {
+  try {
+    const result = await api('GET', '/api/version');
+    appVersion = String(result?.version || '').trim() || appVersion || 'unknown';
+  } catch {
+    appVersion = appVersion || 'unknown';
+  }
+
+  if (sidebarFooter) {
+    sidebarFooter.textContent = `ArcherInk. - All Rights Reserved\nThe Wall v${appVersion}`;
+  }
 }
 
 async function loadMentionUsers() {
@@ -936,7 +1005,7 @@ function renderMentionMenu(inputElement = activeMentionInput) {
     return;
   }
 
-  const suggestions = mentionUsers
+  const suggestions = getMentionSuggestionUsers()
     .filter(name => name.toLowerCase().includes(context.query))
     .slice(0, 8);
 
@@ -1157,14 +1226,19 @@ function renderWallsList() {
   favouritesList.innerHTML = '';
   wallsList.innerHTML = '';
 
-  for (const wall of walls) {
+  const topWalls = walls.filter(wall => wall.isFavourites || wall.isEveryone);
+  const sharedWalls = walls.filter(wall => !wall.isFavourites && !wall.isEveryone);
+
+  for (const wall of [...topWalls, ...sharedWalls]) {
     const item = document.createElement('li');
     item.dataset.id = wall.id;
     if (wall.id === currentWallId) item.classList.add('active');
-    item.innerHTML = `<span class="wall-icon">${escapeHtml(wall.icon || '🧱')}</span><span>${escapeHtml(wall.name)}</span>`;
+    const ping = Number(wall.pingCount || 0);
+    const pingHtml = ping > 0 ? `<span class="wall-ping" aria-label="${ping} unread ping${ping === 1 ? '' : 's'}">${ping}</span>` : '';
+    item.innerHTML = `<span class="wall-icon">${escapeHtml(wall.icon || '🧱')}</span><span class="wall-name">${escapeHtml(wall.name)}</span>${pingHtml}`;
     item.title = `${wall.name} · by ${wall.owner}`;
     item.addEventListener('click', () => openWall(wall.id));
-    if (wall.isFavourites) {
+    if (wall.isFavourites || wall.isEveryone) {
       favouritesList.appendChild(item);
     } else {
       wallsList.appendChild(item);
@@ -1194,6 +1268,11 @@ function updateWallTitle(wall) {
     return;
   }
 
+  if (wall.isEveryone) {
+    wallMeta.textContent = 'Created by everyone · Everyone use can share and see';
+    return;
+  }
+
   wallMeta.textContent = `Created by ${wall.owner}${wall.canManageMeta ? ' · You can edit this wall' : ' · Only owner or operators can edit wall details'}`;
 }
 
@@ -1201,6 +1280,7 @@ async function openWall(wallId) {
   currentWallId = wallId;
   const wall = getCurrentWall();
   if (!wall) return;
+  wall.pingCount = 0;
 
   emptyState.classList.add('hidden');
   wallView.classList.remove('hidden');
@@ -1419,10 +1499,36 @@ function appendItem(item) {
       media.disablePictureInPicture = true;
       media.setAttribute('disableremoteplayback', '');
       media.setAttribute('controlslist', 'nodownload nofullscreen noremoteplayback');
-    mediaThumb.addEventListener('mouseenter', () => media.play());
+    mediaThumb.addEventListener('mouseenter', () => {
+      media.muted = !soundEnabled;
+      media.play().catch(() => {});
+    });
     mediaThumb.addEventListener('mouseleave', () => {
       media.pause();
       media.currentTime = 0;
+      media.muted = true;
+    });
+  } else if (String(item.mimetype || '').startsWith('audio/')) {
+    const audioPreview = document.createElement('audio');
+    audioPreview.src = `/uploads/${item.filename}`;
+    audioPreview.preload = 'metadata';
+    audioPreview.className = 'audio-preview-source';
+    audioPreview.muted = !soundEnabled;
+
+    media = document.createElement('div');
+    media.className = 'audio-tile-visual';
+    media.innerHTML = '<i class="fa-solid fa-music"></i><span class="audio-tile-label">Audio</span>';
+    mediaThumb.classList.add('media-thumb-audio');
+    mediaThumb.appendChild(audioPreview);
+
+    mediaThumb.addEventListener('mouseenter', () => {
+      audioPreview.muted = !soundEnabled;
+      audioPreview.currentTime = 0;
+      audioPreview.play().catch(() => {});
+    });
+    mediaThumb.addEventListener('mouseleave', () => {
+      audioPreview.pause();
+      audioPreview.currentTime = 0;
     });
   } else {
     media = document.createElement('img');
@@ -1433,9 +1539,9 @@ function appendItem(item) {
   }
 
   mediaThumb.appendChild(media);
-    const thumbShield = document.createElement('div');
-    thumbShield.className = 'media-thumb-shield';
-    mediaThumb.appendChild(thumbShield);
+  const thumbShield = document.createElement('div');
+  thumbShield.className = 'media-thumb-shield';
+  mediaThumb.appendChild(thumbShield);
   mediaThumb.addEventListener('click', () => openLightbox(item));
 
   const ownerBadge = document.createElement('span');
@@ -1683,6 +1789,8 @@ function resetUploadPreview() {
   uploadPreview.classList.add('hidden');
   fileInput.value = '';
   uploadBtn.disabled = true;
+  uploadCancelBtn.classList.add('hidden');
+  uploadCancelBtn.disabled = false;
 }
 
 function getFileSignature(file) {
@@ -1715,6 +1823,7 @@ function createFileListFromSelection() {
 
 function getPreviewKindLabel(file) {
   if (file.type.startsWith('video/')) return 'Video';
+  if (file.type.startsWith('audio/')) return 'Audio';
   if (file.type === 'image/gif') return 'GIF';
   if (file.type === 'image/svg+xml') return 'SVG';
   if (file.type === 'image/avif') return 'AVIF';
@@ -1759,6 +1868,11 @@ function renderUploadPreview() {
       media.playsInline = true;
       media.autoplay = true;
       media.loop = true;
+    } else if (entry.file.type.startsWith('audio/')) {
+      media = document.createElement('audio');
+      media.src = entry.previewUrl;
+      media.controls = true;
+      media.preload = 'metadata';
     } else {
       media = document.createElement('img');
       media.src = entry.previewUrl;
@@ -1781,6 +1895,7 @@ function renderUploadPreview() {
     badge.className = 'preview-badge';
     const kindLabel = getPreviewKindLabel(entry.file);
     const kindIcon = entry.file.type.startsWith('video/') ? 'fa-solid fa-film'
+      : entry.file.type.startsWith('audio/') ? 'fa-solid fa-music'
       : entry.file.type === 'image/svg+xml' ? 'fa-solid fa-bezier-curve'
       : 'fa-regular fa-image';
     badge.innerHTML = `<i class="${kindIcon}"></i><span>${kindLabel}</span>`;
@@ -1815,57 +1930,127 @@ fileInput.addEventListener('change', () => {
   fileInput.value = '';
 });
 
+function setUploadProgress(value) {
+  const clamped = Math.max(0, Math.min(100, Math.round(value)));
+  uploadBar.style.width = `${clamped}%`;
+  uploadPercent.textContent = `${clamped}%`;
+}
+
+function cancelCurrentUpload() {
+  if (!uploadState.inProgress) return;
+  uploadState.cancelRequested = true;
+  uploadCancelBtn.disabled = true;
+  if (uploadState.currentXhr) {
+    uploadState.currentXhr.abort();
+  }
+}
+
+uploadCancelBtn.addEventListener('click', cancelCurrentUpload);
+
 uploadBtn.addEventListener('click', async () => {
   if (isFavouritesWall()) return;
+  if (uploadState.inProgress) return;
   if (!currentWallId || selectedFiles.length === 0) return;
 
+  const queue = [...selectedFiles];
+  const completedSignatures = new Set();
+
+  uploadState.inProgress = true;
+  uploadState.cancelRequested = false;
+  uploadState.currentXhr = null;
+  uploadState.totalBytes = queue.reduce((sum, entry) => sum + (entry.file?.size || 0), 0);
+  uploadState.uploadedBytes = 0;
+
   uploadProgress.classList.remove('hidden');
+  setUploadProgress(0);
   uploadBtn.disabled = true;
+  uploadCancelBtn.classList.remove('hidden');
+  uploadCancelBtn.disabled = false;
 
-  const total = selectedFiles.length;
-  let done = 0;
+  for (const entry of queue) {
+    if (uploadState.cancelRequested) break;
 
-  for (const entry of selectedFiles) {
     const formData = new FormData();
     formData.append('file', entry.file);
     formData.append('caption', captionInput.value.trim());
     formData.append('displayName', entry.displayName || entry.file.name);
+    const fileSize = entry.file?.size || 0;
 
     try {
-      const item = await uploadWithProgress(formData, `/api/walls/${currentWallId}/items`);
+      const item = await uploadWithProgress(formData, `/api/walls/${currentWallId}/items`, {
+        onProgress: (loaded, total) => {
+          const safeTotal = total > 0 ? total : fileSize;
+          const aggregateLoaded = uploadState.uploadedBytes + Math.min(loaded, safeTotal);
+          const percentage = uploadState.totalBytes > 0
+            ? (aggregateLoaded / uploadState.totalBytes) * 100
+            : 100;
+          setUploadProgress(percentage);
+        },
+        setXhr: xhr => {
+          uploadState.currentXhr = xhr;
+        }
+      });
+
+      if (uploadState.cancelRequested) break;
+
+      uploadState.uploadedBytes += fileSize;
+      completedSignatures.add(getFileSignature(entry.file));
       allWallItems.push(item);
       appendItem(item);
       syncFiltersFromItems();
       applyMediaFilters();
-      done += 1;
-      const percentage = Math.round((done / total) * 100);
-      uploadBar.style.width = `${percentage}%`;
-      uploadPercent.textContent = `${percentage}%`;
+      const percentage = uploadState.totalBytes > 0
+        ? (uploadState.uploadedBytes / uploadState.totalBytes) * 100
+        : 100;
+      setUploadProgress(percentage);
     } catch (error) {
+      if (error && error.message === '__UPLOAD_CANCELLED__') {
+        break;
+      }
       alert(`Upload failed for "${entry.displayName || entry.file.name}": ${error.message}`);
     }
   }
 
-  captionInput.value = '';
+  const wasCancelled = uploadState.cancelRequested;
+  uploadState.inProgress = false;
+  uploadState.cancelRequested = false;
+  uploadState.currentXhr = null;
+  uploadState.totalBytes = 0;
+  uploadState.uploadedBytes = 0;
+
   uploadBtn.disabled = false;
-  resetUploadPreview();
+  uploadCancelBtn.classList.add('hidden');
+  uploadCancelBtn.disabled = false;
+
+  if (wasCancelled) {
+    selectedFiles = selectedFiles.filter(entry => !completedSignatures.has(getFileSignature(entry.file)));
+    createFileListFromSelection();
+    renderUploadPreview();
+    uploadPercent.textContent = 'Cancelled';
+  } else {
+    captionInput.value = '';
+    resetUploadPreview();
+  }
+
   setTimeout(() => {
     uploadProgress.classList.add('hidden');
-    uploadBar.style.width = '0%';
-    uploadPercent.textContent = '0%';
+    setUploadProgress(0);
   }, 800);
 });
 
-function uploadWithProgress(formData, url) {
+function uploadWithProgress(formData, url, { onProgress = null, setXhr = null } = {}) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', url);
+    if (typeof setXhr === 'function') {
+      setXhr(xhr);
+    }
 
     xhr.upload.addEventListener('progress', event => {
       if (!event.lengthComputable) return;
-      const percentage = Math.round((event.loaded / event.total) * 100);
-      uploadBar.style.width = `${percentage}%`;
-      uploadPercent.textContent = `${percentage}%`;
+      if (typeof onProgress === 'function') {
+        onProgress(event.loaded, event.total);
+      }
     });
 
     xhr.addEventListener('load', () => {
@@ -1886,6 +2071,7 @@ function uploadWithProgress(formData, url) {
     });
 
     xhr.addEventListener('error', () => reject(new Error('Network error')));
+    xhr.addEventListener('abort', () => reject(new Error('__UPLOAD_CANCELLED__')));
     xhr.send(formData);
   });
 }
@@ -1949,6 +2135,13 @@ function openLightbox(item) {
     media.src = `/uploads/${item.filename}`;
     media.controls = true;
     media.autoplay = true;
+    media.muted = !soundEnabled;
+  } else if (String(item.mimetype || '').startsWith('audio/')) {
+    media = document.createElement('audio');
+    media.src = `/uploads/${item.filename}`;
+    media.controls = true;
+    media.autoplay = true;
+    media.muted = !soundEnabled;
   } else {
     media = document.createElement('img');
     media.src = `/uploads/${item.filename}`;

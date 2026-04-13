@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 const bcrypt = require('bcryptjs');
+const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
@@ -21,6 +22,7 @@ The Wall - Admin CLI
   op add "<name>"                        Add user to operator list
   op remove "<name>"                     Remove user from operator list
   op list                                List operators
+  update                                 Update tracked files from origin/main
   wall add "<name>"                      Add a new wall
   wall remove "<name>"                   Remove a wall
   wall edit "<name>" "<new name>"        Rename a wall
@@ -378,6 +380,54 @@ async function executeOperatorCommand(tokens) {
   return { handled: true, success: false };
 }
 
+function runGit(args, options = {}) {
+  return execFileSync('git', args, {
+    cwd: path.join(__dirname, '..'),
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    ...options
+  }).trim();
+}
+
+async function executeUpdateCommand(tokens, options = {}) {
+  if (tokens[0] !== 'update') {
+    return { handled: false };
+  }
+
+  let currentHead;
+  let remoteHead;
+
+  try {
+    currentHead = runGit(['rev-parse', 'HEAD']);
+    runGit(['fetch', 'origin', 'main']);
+    remoteHead = runGit(['rev-parse', 'origin/main']);
+  } catch (error) {
+    console.error(`Update failed: ${error.message}`);
+    return { handled: true, success: false };
+  }
+
+  if (currentHead === remoteHead) {
+    console.log('The Wall is already up to date.');
+    return { handled: true, success: true };
+  }
+
+  const confirm = options.confirm || (async () => false);
+  const approved = await confirm('Update tracked files from origin/main? This preserves uploads and data.json. [y/N] ');
+  if (!approved) {
+    console.log('Update cancelled.');
+    return { handled: true, success: false };
+  }
+
+  try {
+    runGit(['restore', '--source', 'origin/main', '--worktree', '--staged', '--', '.']);
+    console.log('Update completed.');
+    return { handled: true, success: true };
+  } catch (error) {
+    console.error(`Update failed: ${error.message}`);
+    return { handled: true, success: false };
+  }
+}
+
 async function executeCommand(tokens, options = {}) {
   const friendResult = await executeFriendCommand(tokens);
   if (friendResult.handled) {
@@ -387,6 +437,11 @@ async function executeCommand(tokens, options = {}) {
   const opResult = await executeOperatorCommand(tokens);
   if (opResult.handled) {
     return opResult;
+  }
+
+  const updateResult = await executeUpdateCommand(tokens, options);
+  if (updateResult.handled) {
+    return updateResult;
   }
 
   return executeWallCommand(tokens, options);
@@ -420,6 +475,7 @@ if (require.main === module) {
 module.exports = {
   executeCommand,
   executeFriendCommand,
+  executeUpdateCommand,
   executeWallCommand,
   printHelp,
   tokenizeCommand,
