@@ -2,6 +2,7 @@
 const bcrypt = require('bcryptjs');
 const { execFileSync } = require('child_process');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const readline = require('readline');
 const { v4: uuidv4 } = require('uuid');
@@ -9,6 +10,9 @@ const { loadDB, saveDB } = require('./db');
 const { WALL_ICONS, DEFAULT_WALL_ICON, getWallIconById, normalizeWallIcon } = require('./wall-icons');
 
 const UPLOADS_DIR = path.join(__dirname, '..', 'uploads');
+const REPO_ROOT = path.join(__dirname, '..');
+const UPDATE_REPO_URL = 'https://github.com/FastArcherX/thewall';
+const UPDATE_BRANCH = 'main';
 
 function printHelp() {
   console.log(`
@@ -381,35 +385,54 @@ async function executeOperatorCommand(tokens) {
 }
 
 function runGit(args, options = {}) {
-  const repoRoot = findRepoRoot();
-  if (!repoRoot) {
-    throw new Error('Unable to locate the repository root.');
+  if (!hasGitMetadata()) {
+    throw new Error('Git metadata not available in this environment.');
   }
 
   return execFileSync('git', args, {
-    cwd: repoRoot,
+    cwd: REPO_ROOT,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
     ...options
   }).trim();
 }
 
-function findRepoRoot() {
-  const candidateRoots = [__dirname, path.join(__dirname, '..'), process.cwd(), path.dirname(process.argv[1] || '')].filter(Boolean);
+function hasGitMetadata() {
+  return fs.existsSync(path.join(REPO_ROOT, '.git'));
+}
 
-  for (const startDir of candidateRoots) {
-    let currentDir = path.resolve(startDir);
-    for (;;) {
-      if (fs.existsSync(path.join(currentDir, '.git'))) {
-        return currentDir;
-      }
-      const parentDir = path.dirname(currentDir);
-      if (parentDir === currentDir) break;
-      currentDir = parentDir;
+function downloadBuffer(url) {
+  return fetch(url, {
+    headers: {
+      'User-Agent': 'thewall-update'
     }
-  }
+  }).then(async response => {
+    if (!response.ok) {
+      throw new Error(`Failed to download update archive: ${response.status} ${response.statusText}`);
+    }
+    return Buffer.from(await response.arrayBuffer());
+  });
+}
 
-  return null;
+function applyGitHubArchiveUpdate(archivePath) {
+  execFileSync('tar', ['-xzf', archivePath, '-C', REPO_ROOT, '--strip-components=1'], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+}
+
+async function updateFromGitHubArchive() {
+  const archiveUrl = `${UPDATE_REPO_URL}/archive/refs/heads/${UPDATE_BRANCH}.tar.gz`;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'thewall-update-'));
+  const archivePath = path.join(tempDir, 'thewall-update.tar.gz');
+
+  try {
+    const archiveBuffer = await downloadBuffer(archiveUrl);
+    fs.writeFileSync(archivePath, archiveBuffer);
+    applyGitHubArchiveUpdate(archivePath);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 }
 
 async function executeUpdateCommand(tokens, options = {}) {
@@ -417,33 +440,38 @@ async function executeUpdateCommand(tokens, options = {}) {
     return { handled: false };
   }
 
-  let currentHead;
-  let remoteHead;
-
   try {
-    currentHead = runGit(['rev-parse', 'HEAD']);
-    runGit(['fetch', 'origin', 'main']);
-    remoteHead = runGit(['rev-parse', 'origin/main']);
-  } catch (error) {
-    console.error(`Update failed: ${error.message}`);
-    return { handled: true, success: false };
-  }
+    const confirm = options.confirm || (async () => false);
 
-  if (currentHead === remoteHead) {
-    console.log('The Wall is already up to date.');
-    return { handled: true, success: true };
-  }
+    if (hasGitMetadata()) {
+      const currentHead = runGit(['rev-parse', 'HEAD']);
+      runGit(['fetch', 'origin', UPDATE_BRANCH]);
+      const remoteHead = runGit(['rev-parse', `origin/${UPDATE_BRANCH}`]);
 
-  const confirm = options.confirm || (async () => false);
-  const approved = await confirm('Update tracked files from origin/main? This preserves uploads and data.json. [y/N] ');
-  if (!approved) {
-    console.log('Update cancelled.');
-    return { handled: true, success: false };
-  }
+      if (currentHead === remoteHead) {
+        console.log('The Wall is already up to date.');
+        return { handled: true, success: true };
+      }
 
-  try {
-    runGit(['restore', '--source', 'origin/main', '--worktree', '--staged', '--', '.']);
-    console.log('Update completed.');
+      const approved = await confirm(`Update tracked files from ${UPDATE_REPO_URL}? This preserves uploads and data.json. [y/N] `);
+      if (!approved) {
+        console.log('Update cancelled.');
+        return { handled: true, success: false };
+      }
+
+      runGit(['restore', '--source', `origin/${UPDATE_BRANCH}`, '--worktree', '--staged', '--', '.']);
+      console.log('Update completed.');
+      return { handled: true, success: true };
+    }
+
+    const approved = await confirm(`Git metadata not found. Download latest files from ${UPDATE_REPO_URL}? This preserves uploads and data.json. [y/N] `);
+    if (!approved) {
+      console.log('Update cancelled.');
+      return { handled: true, success: false };
+    }
+
+    await updateFromGitHubArchive();
+    console.log('Update completed from GitHub archive.');
     return { handled: true, success: true };
   } catch (error) {
     console.error(`Update failed: ${error.message}`);
