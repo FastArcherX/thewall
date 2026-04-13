@@ -13,6 +13,7 @@ const UPLOADS_DIR = path.join(__dirname, '..', 'uploads');
 const REPO_ROOT = path.join(__dirname, '..');
 const UPDATE_REPO_URL = 'https://github.com/FastArcherX/thewall';
 const UPDATE_BRANCH = 'main';
+const UPDATE_META_FILE = path.join(REPO_ROOT, '.thewall-update-meta.json');
 
 function printHelp() {
   console.log(`
@@ -397,6 +398,49 @@ function downloadBuffer(url) {
   });
 }
 
+async function fetchRemoteCommitSha() {
+  const apiUrl = `https://api.github.com/repos/FastArcherX/thewall/commits/${UPDATE_BRANCH}`;
+  const response = await fetch(apiUrl, {
+    headers: {
+      'User-Agent': 'thewall-update',
+      'Accept': 'application/vnd.github+json'
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(`Unable to fetch latest commit info: ${response.status} ${response.statusText}`);
+  }
+
+  const payload = await response.json();
+  return typeof payload?.sha === 'string' ? payload.sha.trim() : '';
+}
+
+function readLocalUpdatedCommitSha() {
+  if (!fs.existsSync(UPDATE_META_FILE)) {
+    return '';
+  }
+
+  try {
+    const raw = fs.readFileSync(UPDATE_META_FILE, 'utf8');
+    const meta = JSON.parse(raw);
+    return typeof meta?.sha === 'string' ? meta.sha.trim() : '';
+  } catch {
+    return '';
+  }
+}
+
+function writeLocalUpdatedCommitSha(sha) {
+  if (!sha) return;
+
+  const meta = {
+    sha,
+    branch: UPDATE_BRANCH,
+    updatedAt: new Date().toISOString()
+  };
+
+  fs.writeFileSync(UPDATE_META_FILE, JSON.stringify(meta, null, 2));
+}
+
 function applyGitHubArchiveUpdate(archivePath) {
   execFileSync('tar', ['-xzf', archivePath, '-C', REPO_ROOT, '--strip-components=1'], {
     encoding: 'utf8',
@@ -424,15 +468,24 @@ async function executeUpdateCommand(tokens, options = {}) {
   }
 
   try {
+    const remoteSha = await fetchRemoteCommitSha();
+    const localSha = readLocalUpdatedCommitSha();
+
+    if (remoteSha && localSha && remoteSha === localSha) {
+      console.log('This is already the last version');
+      return { handled: true, success: true };
+    }
+
     const confirm = options.confirm || (async () => false);
 
-    const approved = await confirm('Update from GitHub and preserve uploads/data.json? [y/N] ');
+    const approved = await confirm('Update from GitHub and preserve uploads/data.json?');
     if (!approved) {
       console.log('Update cancelled.');
       return { handled: true, success: false };
     }
 
     await updateFromGitHubArchive();
+    writeLocalUpdatedCommitSha(remoteSha);
     console.log('Update completed from GitHub.');
     return { handled: true, success: true };
   } catch (error) {
@@ -467,7 +520,8 @@ function createConfirmPrompt() {
 
   return async message => {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    const answer = await new Promise(resolve => rl.question(message, resolve));
+    console.log(message);
+    const answer = await new Promise(resolve => rl.question('[y/N] ', resolve));
     rl.close();
     return /^y(es)?$/i.test(String(answer).trim());
   };
