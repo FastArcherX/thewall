@@ -73,15 +73,17 @@
         <div id="upload-area">
           <label id="upload-label" for="file-input">
             <span><i class="fa-solid fa-cloud-arrow-up"></i> Click or drop files here to preview before uploading</span>
-            <input type="file" id="file-input" accept="image/*,video/*,audio/*,.gif,.ico,.mp3,.mp4,.mkv,.wav" multiple />
+            <input type="file" id="file-input" accept="image/*,video/*,audio/*,.gif,.ico,.mp3,.mp4,.mkv,.wav,.ogg" multiple />
           </label>
           <input type="text" id="caption-input" placeholder="Caption for selected files (optional)" />
           <div id="caption-mention-menu" class="hidden"></div>
           <button id="upload-btn" disabled><i class="fa-solid fa-upload"></i><span>Upload</span></button>
-          <button id="upload-cancel-btn" class="hidden" type="button"><i class="fa-solid fa-xmark"></i><span>Cancel</span></button>
           <div id="upload-progress" class="hidden">
-            <div id="upload-bar"></div>
+            <div>
+              <div id="upload-bar"></div>
+            </div>
             <span id="upload-percent">0%</span>
+            <button id="upload-cancel-btn" type="button" title="Cancel upload"><i class="fa-solid fa-xmark"></i></button>
           </div>
           <div id="upload-preview" class="hidden"></div>
           <div id="search-area">
@@ -126,8 +128,11 @@
   <!-- LIGHTBOX -->
   <div id="lightbox" class="hidden">
     <button id="lightbox-close" aria-label="Close"><i class="fa-solid fa-xmark"></i></button>
+    <button id="lightbox-share-delete-btn" title="Delete temporary share link" class="hidden"><i class="fa-solid fa-trash"></i></button>
+    <button id="lightbox-share-btn" title="Create temporary share link"><i class="fa-solid fa-link"></i><span>Create</span></button>
     <div id="lightbox-content"></div>
     <p id="lightbox-caption" class="hidden"></p>
+    <div id="share-notification" class="hidden"></div>
   </div>
 
   <!-- MODALS -->
@@ -171,6 +176,20 @@
   <button id="sound-toggle-btn" type="button" aria-label="Toggle sound" title="Sound on">
     <i class="fa-solid fa-volume-high"></i>
   </button>
+
+  <div id="undo-container" class="hidden">
+    <button id="undo-btn"><i class="fa-solid fa-arrow-rotate-left"></i><span>Undo last upload</span></button>
+  </div>
+
+  <div id="multi-select-container" class="hidden">
+    <div id="multi-select-panel">
+      <span id="multi-select-count">0 selected</span>
+      <div id="multi-select-buttons">
+        <button id="multi-select-cancel" class="cancel-btn"><i class="fa-solid fa-xmark"></i><span>Annulla</span></button>
+        <button id="multi-select-delete" class="delete-btn"><i class="fa-solid fa-trash"></i><span>Delete</span></button>
+      </div>
+    </div>
+  </div>
 
   <script src="/js/app.js"></script>
 </body>

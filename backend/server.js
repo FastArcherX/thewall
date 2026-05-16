@@ -5,6 +5,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const readline = require('readline');
+const ExifParser = require('exif-parser');
 const { v4: uuidv4 } = require('uuid');
 const { loadDB, saveDB } = require('./db');
 const { executeCommand, printHelp, tokenizeCommand } = require('./cli');
@@ -14,6 +15,30 @@ const appPackage = require('../package.json');
 const app = express();
 const PORT = 3000;
 const EVERYONE_WALL_ID = 'wall:everyone';
+
+// Map to store temporary share codes: code -> { itemId, wallId, expiresAt, filename, mimeType }
+const temporaryShares = new Map();
+
+// Load persisted temporary shares from DB (if any)
+try {
+  const _db = loadDB();
+  if (Array.isArray(_db.temporaryShares)) {
+    for (const s of _db.temporaryShares) {
+      if (s && s.code) {
+        temporaryShares.set(s.code, {
+          itemId: s.itemId,
+          wallId: s.wallId,
+          expiresAt: s.expiresAt,
+          filename: s.filename,
+          mimeType: s.mimeType || 'application/octet-stream'
+        });
+      }
+    }
+    console.log(`Loaded ${temporaryShares.size} temporary share(s) from DB`);
+  }
+} catch (err) {
+  console.error('Failed to load persisted temporary shares:', err);
+}
 
 // Ensure uploads directory exists
 const UPLOADS_DIR = path.join(__dirname, '..', 'uploads');
@@ -261,6 +286,29 @@ function sanitizeUploadDisplayName(displayName, originalName) {
     return safeName;
   }
   return `${safeName}${originalExt}`;
+}
+
+function parseDateFromFilename(filename) {
+  const name = String(filename || '').trim();
+  if (!name) return null;
+
+  const patterns = [
+    /(?:^|[-_])(\d{4})(\d{2})(\d{2})(?:[-_]|\b)/,
+    /(?:^|[-_])(\d{4})-(\d{2})-(\d{2})(?:[-_]|\b)/
+  ];
+
+  for (const pattern of patterns) {
+    const match = name.match(pattern);
+    if (!match) continue;
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    if (!year || !month || !day) continue;
+    const dt = new Date(Date.UTC(year, month - 1, day));
+    if (!Number.isNaN(dt.getTime())) return dt.toISOString();
+  }
+
+  return null;
 }
 
 function startAdminConsole() {
@@ -675,6 +723,77 @@ app.post('/api/walls/:wallId/items', requireAuth, upload.single('file'), (req, r
     fs.unlinkSync(req.file.path);
     return res.status(403).json({ error: 'Access denied to this wall' });
   }
+  // Extract EXIF date if available
+  let exifDate = null;
+  let exifSource = null;
+  if (req.file.mimetype.startsWith('image/')) {
+    try {
+      const fileBuffer = fs.readFileSync(req.file.path);
+      const parser = ExifParser.create(fileBuffer);
+      const result = parser.parse();
+      
+      const dtTags = result.tags || {};
+      const tryParseExifValue = (val) => {
+        if (!val && val !== 0) return null;
+        // numeric timestamp (seconds since epoch)
+        if (typeof val === 'number') {
+          try {
+            return new Date(val * 1000).toISOString();
+          } catch (e) {
+            return null;
+          }
+        }
+        // string in format "YYYY:MM:DD HH:MM:SS"
+        if (typeof val === 'string') {
+          const formatted = val.replace(/(\d{4}):(\d{2}):(\d{2}) /, '$1-$2-$3T').replace(/\s/, '');
+          try {
+            return new Date(formatted + 'Z').toISOString();
+          } catch (e) {
+            return null;
+          }
+        }
+        return null;
+      };
+
+      // Prefer DateTimeOriginal, then DateTime, then other candidates
+      const candidates = [dtTags.DateTimeOriginal, dtTags.DateTime, dtTags.CreateDate, dtTags.ModifyDate];
+      let parsed = null;
+      for (const cand of candidates) {
+        parsed = tryParseExifValue(cand);
+        if (parsed) {
+          console.log('[EXIF] Parsed candidate:', cand, '->', parsed);
+          exifDate = parsed;
+          exifSource = 'exif';
+          break;
+        }
+      }
+      if (!exifDate) console.log('[EXIF] No DateTime tags found or parse failed');
+    } catch (err) {
+      // EXIF extraction failed, will use uploadedAt instead
+      console.log('[EXIF] Extraction error:', err.message);
+    }
+  }
+
+  // Fallback to client-side file metadata when EXIF is absent
+  if (!exifDate && req.body.fileLastModified) {
+    const ms = Number(req.body.fileLastModified);
+    if (Number.isFinite(ms) && ms > 0) {
+      const dt = new Date(ms);
+      if (!Number.isNaN(dt.getTime())) {
+        exifDate = dt.toISOString();
+        exifSource = 'file';
+      }
+    }
+  }
+
+  if (!exifDate) {
+    const filenameDate = parseDateFromFilename(req.file.originalname || req.body.displayName || req.file.filename);
+    if (filenameDate) {
+      exifDate = filenameDate;
+      exifSource = 'filename';
+    }
+  }
+
   const item = {
     id: uuidv4(),
     filename: req.file.filename,
@@ -682,7 +801,9 @@ app.post('/api/walls/:wallId/items', requireAuth, upload.single('file'), (req, r
     mimetype: req.file.mimetype,
     caption: req.body.caption || '',
     uploadedAt: new Date().toISOString(),
-    uploadedBy: req.session.user.name
+    uploadedBy: req.session.user.name,
+    exifDate: exifDate,
+    exifSource: exifSource
   };
   wall.items.push(item);
   notifyMentions(db, wall, req.session.user.name, '', item.caption || '');
@@ -790,6 +911,159 @@ app.patch('/api/walls/:wallId/items/:itemId', requireAuth, (req, res) => {
   res.json({ success: true });
 });
 
+// ── Share endpoints ───────────────────────────────────────────────────────────
+app.post('/api/share', requireAuth, (req, res) => {
+  const { itemId, wallId } = req.body;
+  const db = loadDB();
+
+  if (!itemId || !wallId) {
+    return res.status(400).json({ error: 'itemId and wallId required' });
+  }
+
+  // Verify user has access to this item
+  const wall = getWallById(db, wallId);
+  if (!wall) return res.status(404).json({ error: 'Wall not found' });
+
+  const item = wall.items?.find(i => i.id === itemId);
+  if (!item) return res.status(404).json({ error: 'Item not found' });
+
+  // Generate random share code (8 characters)
+  const code = Math.random().toString(36).substring(2, 10);
+  const expiresAt = Date.now() + (5 * 24 * 60 * 60 * 1000); // 5 days
+
+  // Store share info in memory
+  temporaryShares.set(code, {
+    itemId,
+    wallId,
+    expiresAt,
+    filename: item.filename,
+    mimeType: item.mimetype || 'application/octet-stream'
+  });
+
+  // Persist to DB
+  try {
+    const db2 = loadDB();
+    db2.temporaryShares = Array.from(temporaryShares.entries()).map(([codeKey, info]) => ({
+      code: codeKey,
+      itemId: info.itemId,
+      wallId: info.wallId,
+      expiresAt: info.expiresAt,
+      filename: info.filename,
+      mimeType: info.mimeType
+    }));
+    saveDB(db2);
+  } catch (err) {
+    console.error('Failed to persist temporary share:', err);
+  }
+
+  res.json({ code, expiresAt });
+});
+
+// Lookup existing share for an item
+app.get('/api/share', requireAuth, (req, res) => {
+  const { itemId, wallId } = req.query;
+  if (!itemId || !wallId) return res.status(400).json({ error: 'itemId and wallId required' });
+  for (const [code, info] of temporaryShares.entries()) {
+    if (info.itemId === itemId && info.wallId === wallId) {
+      // if expired, remove and return 404
+      if (Date.now() > info.expiresAt) {
+        temporaryShares.delete(code);
+        try {
+          const db2 = loadDB();
+          db2.temporaryShares = Array.from(temporaryShares.entries()).map(([codeKey, info2]) => ({
+            code: codeKey,
+            itemId: info2.itemId,
+            wallId: info2.wallId,
+            expiresAt: info2.expiresAt,
+            filename: info2.filename,
+            mimeType: info2.mimeType
+          }));
+          saveDB(db2);
+        } catch (err) { console.error('Failed to persist temporary share removal:', err); }
+        return res.status(404).json({ error: 'Share not found' });
+      }
+      return res.json({ code, expiresAt: info.expiresAt });
+    }
+  }
+  return res.status(404).json({ error: 'Share not found' });
+});
+
+// Delete a share by code (or by item/wall via query)
+app.delete('/api/share', requireAuth, (req, res) => {
+  const { code, itemId, wallId } = req.query;
+  let removed = false;
+  if (code) {
+    removed = temporaryShares.delete(code);
+  } else if (itemId && wallId) {
+    for (const [c, info] of temporaryShares.entries()) {
+      if (info.itemId === itemId && info.wallId === wallId) {
+        temporaryShares.delete(c);
+        removed = true;
+        break;
+      }
+    }
+  } else {
+    return res.status(400).json({ error: 'code or itemId+wallId required' });
+  }
+
+  if (removed) {
+    try {
+      const db2 = loadDB();
+      db2.temporaryShares = Array.from(temporaryShares.entries()).map(([codeKey, info]) => ({
+        code: codeKey,
+        itemId: info.itemId,
+        wallId: info.wallId,
+        expiresAt: info.expiresAt,
+        filename: info.filename,
+        mimeType: info.mimeType
+      }));
+      saveDB(db2);
+    } catch (err) { console.error('Failed to persist temporary share removal:', err); }
+    return res.json({ success: true });
+  }
+  return res.status(404).json({ error: 'Share not found' });
+});
+
+// Serve shared file without authentication
+app.get('/id-shared/:code', (req, res) => {
+  const { code } = req.params;
+  const shareInfo = temporaryShares.get(code);
+
+  if (!shareInfo) {
+    // Code not found or expired - redirect to home
+    return res.redirect('/');
+  }
+
+  // Check if code is expired
+  if (Date.now() > shareInfo.expiresAt) {
+    temporaryShares.delete(code);
+    try {
+      const db2 = loadDB();
+      db2.temporaryShares = Array.from(temporaryShares.entries()).map(([codeKey, info2]) => ({
+        code: codeKey,
+        itemId: info2.itemId,
+        wallId: info2.wallId,
+        expiresAt: info2.expiresAt,
+        filename: info2.filename,
+        mimeType: info2.mimeType
+      }));
+      saveDB(db2);
+    } catch (err) { console.error('Failed to persist expired share removal:', err); }
+    return res.redirect('/');
+  }
+
+  // Serve the file
+  const filePath = path.join(UPLOADS_DIR, shareInfo.filename);
+  
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: 'File not found' });
+  }
+
+  res.setHeader('Content-Type', shareInfo.mimeType);
+  res.setHeader('Content-Disposition', `inline; filename="${path.basename(shareInfo.filename)}"`);
+  res.sendFile(filePath);
+});
+
 app.use((err, req, res, next) => {
   if (err instanceof multer.MulterError || err.message) {
     return res.status(400).json({ error: err.message || 'Upload failed' });
@@ -798,7 +1072,7 @@ app.use((err, req, res, next) => {
 });
 
 // ── Serve SPA ─────────────────────────────────────────────────────────────────
-app.get('/{*splat}', (req, res) => {
+app.get(/^(?!\/api|\/uploads).*$/, (req, res) => {
   res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
 });
 

@@ -6,6 +6,7 @@ let wallIcons = [];
 let selectedFiles = [];
 let mentionUsers = [];
 let allWallItems = [];
+let lastUploadedItemIds = [];
 let favouriteRefSet = new Set();
 const customSelectMap = new Map();
 const mentionState = {
@@ -78,8 +79,12 @@ const sidebarFooter = document.getElementById('sidebar-footer');
 const mediaGrid = document.getElementById('media-grid');
 const lightbox = document.getElementById('lightbox');
 const lightboxClose = document.getElementById('lightbox-close');
+const lightboxShareBtn = document.getElementById('lightbox-share-btn');
 const lightboxContent = document.getElementById('lightbox-content');
 const lightboxCaption = document.getElementById('lightbox-caption');
+const shareNotification = document.getElementById('share-notification');
+const lightboxShareDeleteBtn = document.getElementById('lightbox-share-delete-btn');
+const globalShareDeleteBtn = document.getElementById('global-share-delete-btn');
 const modalOverlay = document.getElementById('modal-overlay');
 const modalBox = document.getElementById('modal-box');
 const modalMessage = document.getElementById('modal-message');
@@ -97,6 +102,16 @@ const infoOverlay = document.getElementById('info-overlay');
 const infoClose = document.getElementById('info-close');
 const infoContent = document.getElementById('info-content');
 const soundToggleBtn = document.getElementById('sound-toggle-btn');
+const undoContainer = document.getElementById('undo-container');
+const undoBtn = document.getElementById('undo-btn');
+const multiSelectContainer = document.getElementById('multi-select-container');
+const multiSelectPanel = document.getElementById('multi-select-panel');
+const multiSelectCount = document.getElementById('multi-select-count');
+const multiSelectCancel = document.getElementById('multi-select-cancel');
+const multiSelectDelete = document.getElementById('multi-select-delete');
+
+// When true, the undo control remains suppressed until a new upload resets it
+let undoSuppressed = false;
 
 const uploadState = {
   inProgress: false,
@@ -104,6 +119,18 @@ const uploadState = {
   currentXhr: null,
   totalBytes: 0,
   uploadedBytes: 0
+};
+
+const multiSelectState = {
+  active: false,
+  selectedIds: new Set()
+};
+
+const shareState = {
+  currentItem: null,
+  currentCode: null,
+  expiresAt: null,
+  countdownInterval: null
 };
 
 let appVersion = '';
@@ -1466,6 +1493,84 @@ async function loadItems() {
   }
 }
 
+function activateMultiSelect() {
+  multiSelectState.active = true;
+  // Starting a multi-select suppresses undo until a new upload resets it
+  undoSuppressed = true;
+  // Occupy undo slot when suppression is active
+  multiSelectContainer.style.bottom = '16px';
+  multiSelectContainer.classList.remove('hidden');
+  // hide undo while multi-select is active
+  undoContainer.classList.add('hidden');
+  updateMultiSelectCount();
+}
+
+function deactivateMultiSelect() {
+  multiSelectState.active = false;
+  multiSelectState.selectedIds.clear();
+  multiSelectContainer.classList.add('hidden');
+  // Do not reveal undo if it was suppressed by starting a multi-select.
+  // Only show undo when not suppressed and there are undoable items.
+  if (!undoSuppressed && Array.isArray(lastUploadedItemIds) && lastUploadedItemIds.length > 0) {
+    undoContainer.classList.remove('hidden');
+  } else {
+    undoContainer.classList.add('hidden');
+  }
+  
+  document.querySelectorAll('.media-item.selected').forEach(item => {
+    item.classList.remove('selected');
+  });
+}
+
+function toggleItemSelection(itemId, element) {
+  if (multiSelectState.selectedIds.has(itemId)) {
+    multiSelectState.selectedIds.delete(itemId);
+    element.classList.remove('selected');
+  } else {
+    multiSelectState.selectedIds.add(itemId);
+    element.classList.add('selected');
+  }
+  updateMultiSelectCount();
+  
+  // Auto-annulla se non ci sono elementi selezionati
+  if (multiSelectState.selectedIds.size === 0 && multiSelectState.active) {
+    deactivateMultiSelect();
+  }
+}
+
+function updateMultiSelectCount() {
+  const count = multiSelectState.selectedIds.size;
+  multiSelectCount.textContent = `${count} selected`;
+}
+
+async function deleteMultipleItems() {
+  if (multiSelectState.selectedIds.size === 0) return;
+  
+  const itemIds = Array.from(multiSelectState.selectedIds);
+  
+  const confirmed = await showModal({
+    message: `Delete ${itemIds.length} item${itemIds.length > 1 ? 's' : ''}?`,
+    confirmLabel: 'Delete'
+  });
+  
+  if (!confirmed) return;
+  
+  for (const itemId of itemIds) {
+    try {
+      await fetch(`/api/walls/${currentWallId}/items/${itemId}`, { method: 'DELETE' });
+      const element = mediaGrid.querySelector(`[data-id="${itemId}"]`);
+      if (element) element.remove();
+    } catch (error) {
+      console.error(`Failed to delete item ${itemId}:`, error);
+    }
+  }
+  
+  allWallItems = allWallItems.filter(item => !itemIds.includes(item.id));
+  syncFiltersFromItems();
+  applyMediaFilters();
+  deactivateMultiSelect();
+}
+
 function appendItem(item) {
   const favouritesWallOpen = isFavouritesWall();
   const sourceWallId = item.sourceWallId || currentWallId;
@@ -1610,6 +1715,14 @@ function appendItem(item) {
     event.stopPropagation();
     deleteItem(item.id, wrapper);
   });
+  deleteButton.addEventListener('contextmenu', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!multiSelectState.active) {
+      activateMultiSelect();
+    }
+    toggleItemSelection(item.id, wrapper);
+  });
 
   if (favouritesWallOpen) {
     overlay.append(downloadButton, favouriteButton, infoButton);
@@ -1618,6 +1731,12 @@ function appendItem(item) {
   }
   wrapper.append(mediaThumb, dragHandle, ownerBadge, overlay);
   makeItemSortable(wrapper, dragHandle);
+
+  wrapper.addEventListener('click', event => {
+    if (multiSelectState.active && event.target.closest('.item-overlay') === null) {
+      toggleItemSelection(item.id, wrapper);
+    }
+  });
 
   const title = document.createElement('p');
   title.className = 'item-title';
@@ -1748,7 +1867,14 @@ async function editItem(item, element) {
 }
 
 function showInfoModal(item) {
-  const date = formatDateTime(item.uploadedAt);
+  const date = formatDateTime(item.exifDate || item.uploadedAt);
+  const dateSourceLabel = item.exifSource === 'exif'
+    ? ' <em style="color:var(--text-muted); font-size:.85em;">(from image metadata)</em>'
+    : item.exifSource === 'file'
+      ? ' <em style="color:var(--text-muted); font-size:.85em;">(from file date)</em>'
+      : item.exifSource === 'filename'
+        ? ' <em style="color:var(--text-muted); font-size:.85em;">(from filename)</em>'
+      : '';
   const sourceWall = item.sourceWallName ? `<div class="info-row"><span class="info-label">Source wall</span><span class="info-value">${escapeHtml(item.sourceWallName)}</span></div>` : '';
 
   infoContent.innerHTML = `
@@ -1756,7 +1882,7 @@ function showInfoModal(item) {
     ${sourceWall}
     <div class="info-row"><span class="info-label">Caption</span><span class="info-value">${item.caption && item.caption.trim() ? escapeHtml(item.caption) : '<em style="color:var(--text-muted)">None</em>'}</span></div>
     <div class="info-row"><span class="info-label">Uploaded by</span><span class="info-value">${escapeHtml(item.uploadedBy || 'Unknown')}</span></div>
-    <div class="info-row"><span class="info-label">Date &amp; time</span><span class="info-value">${escapeHtml(date)}</span></div>
+    <div class="info-row"><span class="info-label">Date &amp; time</span><span class="info-value">${escapeHtml(date)}${dateSourceLabel}</span></div>
     <div class="info-row"><span class="info-label">Format</span><span class="info-value">${escapeHtml(item.mimetype || 'Unknown')}</span></div>
   `;
 
@@ -1869,10 +1995,9 @@ function renderUploadPreview() {
       media.autoplay = true;
       media.loop = true;
     } else if (entry.file.type.startsWith('audio/')) {
-      media = document.createElement('audio');
-      media.src = entry.previewUrl;
-      media.controls = true;
-      media.preload = 'metadata';
+      media = document.createElement('div');
+      media.className = 'audio-preview-container';
+      media.innerHTML = '<i class="fa-solid fa-music"></i><span>Audio</span>';
     } else {
       media = document.createElement('img');
       media.src = entry.previewUrl;
@@ -1917,11 +2042,50 @@ function renderUploadPreview() {
     });
 
     meta.appendChild(renameInput);
+    // Make preview clickable to open full preview for files not yet uploaded
+    media.style.cursor = 'pointer';
+    media.addEventListener('click', () => openTempPreview(entry));
+
     card.append(media, removeButton, badge, meta);
     grid.appendChild(card);
   });
 
   uploadPreview.append(header, grid);
+}
+
+function openTempPreview(entry) {
+  lightboxContent.innerHTML = '';
+
+  let media;
+  const type = String(entry.file?.type || '');
+  if (type.startsWith('video/')) {
+    media = document.createElement('video');
+    media.src = entry.previewUrl;
+    media.controls = true;
+    media.autoplay = true;
+    media.muted = !soundEnabled;
+  } else if (type.startsWith('audio/')) {
+    media = document.createElement('audio');
+    media.src = entry.previewUrl;
+    media.controls = true;
+    media.autoplay = true;
+    media.muted = !soundEnabled;
+  } else {
+    media = document.createElement('img');
+    media.src = entry.previewUrl;
+    media.alt = entry.displayName || '';
+  }
+
+  lightboxContent.appendChild(media);
+  lightboxCaption.textContent = entry.displayName || '';
+  if (lightboxCaption.textContent) {
+    lightboxCaption.classList.remove('hidden');
+  } else {
+    lightboxCaption.classList.add('hidden');
+  }
+
+  lightbox.classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
 }
 
 fileInput.addEventListener('change', () => {
@@ -1947,6 +2111,39 @@ function cancelCurrentUpload() {
 
 uploadCancelBtn.addEventListener('click', cancelCurrentUpload);
 
+undoBtn.addEventListener('click', async () => {
+  if (!lastUploadedItemIds || lastUploadedItemIds.length === 0) return;
+  
+  const itemIds = [...lastUploadedItemIds];
+  lastUploadedItemIds = [];
+  undoContainer.classList.add('hidden');
+  
+  for (const itemId of itemIds) {
+    try {
+      await fetch(`/api/walls/${currentWallId}/items/${itemId}`, { method: 'DELETE' });
+      // Remove element from DOM immediately
+      const element = mediaGrid.querySelector(`[data-id="${itemId}"]`);
+      if (element) element.remove();
+    } catch (error) {
+      console.error(`Failed to delete item ${itemId}:`, error);
+    }
+  }
+  
+  allWallItems = allWallItems.filter(item => !itemIds.includes(item.id));
+  syncFiltersFromItems();
+  applyMediaFilters();
+});
+
+multiSelectCancel.addEventListener('click', event => {
+  event.stopPropagation();
+  deactivateMultiSelect();
+});
+
+multiSelectDelete.addEventListener('click', event => {
+  event.stopPropagation();
+  deleteMultipleItems();
+});
+
 uploadBtn.addEventListener('click', async () => {
   if (isFavouritesWall()) return;
   if (uploadState.inProgress) return;
@@ -1954,6 +2151,7 @@ uploadBtn.addEventListener('click', async () => {
 
   const queue = [...selectedFiles];
   const completedSignatures = new Set();
+  lastUploadedItemIds = [];
 
   uploadState.inProgress = true;
   uploadState.cancelRequested = false;
@@ -1974,6 +2172,7 @@ uploadBtn.addEventListener('click', async () => {
     formData.append('file', entry.file);
     formData.append('caption', captionInput.value.trim());
     formData.append('displayName', entry.displayName || entry.file.name);
+    formData.append('fileLastModified', String(entry.file?.lastModified || ''));
     const fileSize = entry.file?.size || 0;
 
     try {
@@ -1996,6 +2195,7 @@ uploadBtn.addEventListener('click', async () => {
       uploadState.uploadedBytes += fileSize;
       completedSignatures.add(getFileSignature(entry.file));
       allWallItems.push(item);
+      lastUploadedItemIds.push(item.id);
       appendItem(item);
       syncFiltersFromItems();
       applyMediaFilters();
@@ -2030,6 +2230,12 @@ uploadBtn.addEventListener('click', async () => {
   } else {
     captionInput.value = '';
     resetUploadPreview();
+    
+    if (lastUploadedItemIds.length > 0) {
+      // New upload resets any suppression and reveals undo
+      undoSuppressed = false;
+      undoContainer.classList.remove('hidden');
+    }
   }
 
   setTimeout(() => {
@@ -2128,6 +2334,41 @@ document.addEventListener('dragend', () => {
 
 function openLightbox(item) {
   lightboxContent.innerHTML = '';
+  shareState.currentItem = item;
+  // reset UI while we check for existing share
+  if (shareState.countdownInterval) {
+    clearInterval(shareState.countdownInterval);
+    shareState.countdownInterval = null;
+  }
+  lightboxShareBtn.innerHTML = '<i class="fa-solid fa-link"></i><span>...</span>';
+  lightboxShareDeleteBtn.classList.add('hidden');
+
+  // Check backend if a share already exists for this item
+  (async () => {
+    try {
+      const resp = await fetch(`/api/share?itemId=${encodeURIComponent(item.id)}&wallId=${encodeURIComponent(currentWallId)}`);
+      if (resp.ok) {
+        const data = await resp.json();
+        shareState.currentCode = data.code;
+        shareState.expiresAt = data.expiresAt;
+        startShareCountdown();
+            lightboxShareDeleteBtn.classList.remove('hidden');
+            if (globalShareDeleteBtn) globalShareDeleteBtn.classList.remove('hidden');
+      } else {
+        // no existing share
+        shareState.currentCode = null;
+        shareState.expiresAt = null;
+        lightboxShareBtn.innerHTML = '<i class="fa-solid fa-link"></i><span>Create</span>';
+        if (globalShareDeleteBtn) globalShareDeleteBtn.classList.add('hidden');
+      }
+    } catch (err) {
+      console.error('Error checking existing share:', err);
+      shareState.currentCode = null;
+      shareState.expiresAt = null;
+      lightboxShareBtn.innerHTML = '<i class="fa-solid fa-link"></i><span>Create</span>';
+      if (globalShareDeleteBtn) globalShareDeleteBtn.classList.add('hidden');
+    }
+  })();
 
   let media;
   if (item.mimetype.startsWith('video/')) {
@@ -2160,13 +2401,140 @@ function openLightbox(item) {
   document.body.style.overflow = 'hidden';
 }
 
+function generateShareCode() {
+  // Genera un codice casuale (es: abc123xyz)
+  return Math.random().toString(36).substring(2, 10);
+}
+
+function showShareNotification(link) {
+  shareNotification.textContent = `${link} copiato`;
+  shareNotification.classList.remove('hidden');
+  setTimeout(() => {
+    shareNotification.classList.add('hidden');
+  }, 3000);
+}
+
+function updateShareButtonCountdown() {
+  if (!shareState.expiresAt) return;
+
+  const now = Date.now();
+  const remaining = Math.max(0, shareState.expiresAt - now);
+
+  if (remaining === 0) {
+    // Link scaduto
+    clearInterval(shareState.countdownInterval);
+    shareState.countdownInterval = null;
+    // attempt to remove persisted share on backend
+    if (shareState.currentCode) {
+      fetch(`/api/share?code=${encodeURIComponent(shareState.currentCode)}`, { method: 'DELETE' }).catch(() => {});
+    }
+    shareState.currentCode = null;
+    shareState.expiresAt = null;
+    shareState.currentItem = null;
+    lightboxShareBtn.innerHTML = '<i class="fa-solid fa-link"></i><span>Create</span>';
+    lightboxShareBtn.title = 'Create temporary share link';
+  } else {
+    const days = Math.floor(remaining / (1000 * 60 * 60 * 24));
+    const hours = Math.floor((remaining % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+    const minutes = Math.floor((remaining % (1000 * 60 * 60)) / (1000 * 60));
+    const seconds = Math.floor((remaining % (1000 * 60)) / 1000);
+    const timeStr = `${days}d ${hours}h ${minutes}m ${seconds}s`;
+    lightboxShareBtn.innerHTML = `<i class="fa-solid fa-link"></i><span>${timeStr}</span>`;
+  }
+}
+
+function startShareCountdown() {
+  if (shareState.countdownInterval) clearInterval(shareState.countdownInterval);
+  shareState.countdownInterval = setInterval(updateShareButtonCountdown, 1000);
+  updateShareButtonCountdown();
+}
+
+async function handleShareDelete() {
+  if (!shareState.currentItem) return;
+  try {
+    // attempt delete by item+wall
+    const resp = await fetch(`/api/share?itemId=${encodeURIComponent(shareState.currentItem.id)}&wallId=${encodeURIComponent(currentWallId)}`, { method: 'DELETE' });
+    if (!resp.ok) throw new Error('Delete failed');
+    // reset UI
+    if (shareState.countdownInterval) {
+      clearInterval(shareState.countdownInterval);
+      shareState.countdownInterval = null;
+    }
+    shareState.currentCode = null;
+    shareState.expiresAt = null;
+    lightboxShareBtn.innerHTML = '<i class="fa-solid fa-link"></i><span>Create</span>';
+    lightboxShareDeleteBtn.classList.add('hidden');
+    if (globalShareDeleteBtn) globalShareDeleteBtn.classList.add('hidden');
+  } catch (err) {
+    console.error('Failed to delete share:', err);
+    alert('Failed to delete share link');
+  }
+}
+
+async function handleShareClick() {
+  if (!shareState.currentItem) return;
+
+  // Se esiste già un codice valido, ricopia il link
+  if (shareState.currentCode && shareState.expiresAt && Date.now() < shareState.expiresAt) {
+    const link = `${window.location.origin}/id-shared/${shareState.currentCode}`;
+    try {
+      await navigator.clipboard.writeText(link);
+      showShareNotification(link);
+    } catch (err) {
+      console.error('Failed to copy to clipboard:', err);
+      alert(`Link: ${link}`);
+    }
+    return;
+  }
+
+  // Richiedi il codice al backend
+  try {
+    const response = await fetch('/api/share', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        itemId: shareState.currentItem.id,
+        wallId: currentWallId
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error('Failed to create share link');
+    }
+
+    const { code, expiresAt } = await response.json();
+    shareState.currentCode = code;
+    shareState.expiresAt = expiresAt;
+
+    // Copia link negli appunti
+    const link = `${window.location.origin}/id-shared/${code}`;
+    try {
+      await navigator.clipboard.writeText(link);
+      showShareNotification(link);
+    } catch (err) {
+      console.error('Failed to copy to clipboard:', err);
+      alert(`Link: ${link}`);
+    }
+
+    // Inizia countdown
+    startShareCountdown();
+  } catch (error) {
+    console.error('Share error:', error);
+    alert('Failed to create share link');
+  }
+}
+
 function closeLightbox() {
   lightbox.classList.add('hidden');
   lightboxContent.innerHTML = '';
   document.body.style.overflow = '';
+  // Keep share countdown running in background so reopening shows remaining time
 }
 
 lightboxClose.addEventListener('click', closeLightbox);
+lightboxShareBtn.addEventListener('click', handleShareClick);
+lightboxShareDeleteBtn.addEventListener('click', handleShareDelete);
+if (globalShareDeleteBtn) globalShareDeleteBtn.addEventListener('click', handleShareDelete);
 lightbox.addEventListener('click', event => {
   if (event.target === lightbox) closeLightbox();
 });

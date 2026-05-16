@@ -11,7 +11,8 @@ function normalizeDB(data) {
     walls: Array.isArray(data?.walls) ? data.walls : [],
     favourites: Array.isArray(data?.favourites) ? data.favourites : [],
     operators: Array.isArray(data?.operators) ? data.operators : [],
-    notifications: Array.isArray(data?.notifications) ? data.notifications : []
+    notifications: Array.isArray(data?.notifications) ? data.notifications : [],
+    temporaryShares: Array.isArray(data?.temporaryShares) ? data.temporaryShares : []
   };
 
   normalized.walls = normalized.walls.map(wall => ({
@@ -32,7 +33,9 @@ function normalizeDB(data) {
           mimetype: item.mimetype || 'application/octet-stream',
           caption: item.caption || '',
           uploadedAt: item.uploadedAt || new Date().toISOString(),
-          uploadedBy: item.uploadedBy || wall.owner || 'Unknown'
+          uploadedBy: item.uploadedBy || wall.owner || 'Unknown',
+          exifDate: item.exifDate || null,
+          exifSource: item.exifSource || null
         }))
       : []
   }));
@@ -79,15 +82,18 @@ function normalizeDB(data) {
 
 function loadDB() {
   if (!fs.existsSync(DB_PATH)) {
-    const initial = { users: [], walls: [], favourites: [], operators: [], notifications: [] };
+    const initial = { users: [], walls: [], favourites: [], operators: [], notifications: [], temporaryShares: [] };
     fs.writeFileSync(DB_PATH, JSON.stringify(initial, null, 2));
-    return initial;
+    return normalizeDB(initial);
   }
   return normalizeDB(JSON.parse(fs.readFileSync(DB_PATH, 'utf8')));
 }
 
 function saveDB(data) {
-  fs.writeFileSync(DB_PATH, JSON.stringify(normalizeDB(data), null, 2));
+  // preserve temporaryShares if present on data
+  const normalized = normalizeDB(data);
+  if (Array.isArray(data.temporaryShares)) normalized.temporaryShares = data.temporaryShares;
+  fs.writeFileSync(DB_PATH, JSON.stringify(normalized, null, 2));
 }
 
 module.exports = { loadDB, saveDB };
