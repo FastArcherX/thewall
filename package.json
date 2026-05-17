@@ -1,6 +1,6 @@
 {
   "name": "thewall",
-  "version": "2.0.0",
+  "version": "2.1.1",
   "description": "The Friend Memory Walls",
   "main": "backend/server.js",
   "bin": {

@@ -128,12 +128,16 @@
   <!-- LIGHTBOX -->
   <div id="lightbox" class="hidden">
     <button id="lightbox-close" aria-label="Close"><i class="fa-solid fa-xmark"></i></button>
-    <button id="lightbox-share-delete-btn" title="Delete temporary share link" class="hidden"><i class="fa-solid fa-trash"></i></button>
-    <button id="lightbox-share-btn" title="Create temporary share link"><i class="fa-solid fa-link"></i><span>Create</span></button>
+    <div id="lightbox-share-controls">
+      <button id="lightbox-share-delete-btn" title="Delete temporary share link" class="hidden"><i class="fa-solid fa-trash"></i></button>
+      <button id="lightbox-share-btn" title="Create temporary share link"><i class="fa-solid fa-link"></i><span>Create</span></button>
+    </div>
     <div id="lightbox-content"></div>
     <p id="lightbox-caption" class="hidden"></p>
     <div id="share-notification" class="hidden"></div>
   </div>
+
+  <div id="everyone-notification" class="hidden"></div>
 
   <!-- MODALS -->
   <div id="modal-overlay" class="hidden">
@@ -143,6 +147,11 @@
       <input type="text" id="modal-input" class="hidden" />
       <label id="modal-label-2" class="modal-field-label hidden"></label>
       <input type="text" id="modal-input2" class="hidden" />
+      <label id="modal-label-3" class="modal-field-label hidden"></label>
+      <div id="modal-input3-wrap" class="hidden">
+        <input type="datetime-local" id="modal-input3" />
+        <button type="button" id="modal-input3-trigger" aria-label="Open calendar"><i class="fa-regular fa-calendar-days"></i></button>
+      </div>
       <div id="modal-btns">
         <button id="modal-confirm">OK</button>
         <button id="modal-cancel">Cancel</button>

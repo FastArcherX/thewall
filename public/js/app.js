@@ -19,6 +19,7 @@ const mentionState = {
 let activeMentionInput = null;
 const mentionBoundInputs = new WeakSet();
 const EVERYONE_MENTION = 'everyone';
+const EVERYONE_WALL_ID = 'wall:everyone';
 const reorderState = {
   sourceEl: null,
   placeholderEl: null,
@@ -79,12 +80,13 @@ const sidebarFooter = document.getElementById('sidebar-footer');
 const mediaGrid = document.getElementById('media-grid');
 const lightbox = document.getElementById('lightbox');
 const lightboxClose = document.getElementById('lightbox-close');
+const lightboxShareControls = document.getElementById('lightbox-share-controls');
 const lightboxShareBtn = document.getElementById('lightbox-share-btn');
 const lightboxContent = document.getElementById('lightbox-content');
 const lightboxCaption = document.getElementById('lightbox-caption');
 const shareNotification = document.getElementById('share-notification');
+const everyoneNotification = document.getElementById('everyone-notification');
 const lightboxShareDeleteBtn = document.getElementById('lightbox-share-delete-btn');
-const globalShareDeleteBtn = document.getElementById('global-share-delete-btn');
 const modalOverlay = document.getElementById('modal-overlay');
 const modalBox = document.getElementById('modal-box');
 const modalMessage = document.getElementById('modal-message');
@@ -93,7 +95,11 @@ const modalConfirm = document.getElementById('modal-confirm');
 const modalCancel = document.getElementById('modal-cancel');
 const modalLabel1 = document.getElementById('modal-label-1');
 const modalLabel2 = document.getElementById('modal-label-2');
+const modalLabel3 = document.getElementById('modal-label-3');
+const modalInput3Wrap = document.getElementById('modal-input3-wrap');
 const modalInput2 = document.getElementById('modal-input2');
+const modalInput3 = document.getElementById('modal-input3');
+const modalInput3Trigger = document.getElementById('modal-input3-trigger');
 const emojiOverlay = document.getElementById('emoji-overlay');
 const emojiBox = document.getElementById('emoji-box');
 const emojiGrid = document.getElementById('emoji-grid');
@@ -132,6 +138,8 @@ const shareState = {
   expiresAt: null,
   countdownInterval: null
 };
+
+let everyoneNotificationTimeout = null;
 
 let appVersion = '';
 let soundEnabled = true;
@@ -228,11 +236,25 @@ async function loadFavouriteRefs() {
   }
 }
 
-function setFavouriteButtonState(button, isFavourite) {
-  button.classList.toggle('is-active', isFavourite);
-  button.setAttribute('aria-label', isFavourite ? 'Remove from favourites' : 'Add to favourites');
-  button.title = isFavourite ? 'Remove from favourites' : 'Add to favourites';
-  button.innerHTML = `<i class="fa-${isFavourite ? 'solid' : 'regular'} fa-star"></i>`;
+function setFavouriteButtonState(button, isFavourite, mode = 'favourite', isEveryoneAdded = false) {
+  button.dataset.mode = mode;
+  button.classList.remove('is-everyone');
+  button.classList.toggle('is-everyone-mode', mode === 'everyone');
+  button.classList.toggle('is-everyone-added', mode === 'everyone' && isEveryoneAdded);
+  button.classList.toggle('is-active', mode === 'favourite' && isFavourite);
+  if (mode === 'everyone') {
+    button.setAttribute('aria-label', isEveryoneAdded ? 'Added to @everyone' : 'Add to @everyone');
+    button.title = isEveryoneAdded ? 'Added to @everyone' : 'Add to @everyone';
+    button.innerHTML = '<i class="fa-solid fa-globe"></i>';
+  } else {
+    button.setAttribute('aria-label', isFavourite ? 'Remove from favourites' : 'Add to favourites');
+    button.title = isFavourite ? 'Remove from favourites' : 'Add to favourites';
+    button.innerHTML = `<i class="fa-${isFavourite ? 'solid' : 'regular'} fa-star"></i>`;
+  }
+}
+
+function setEveryoneButtonState(button, isEveryone) {
+  setFavouriteButtonState(button, false, isEveryone ? 'everyone' : 'favourite', isEveryone);
 }
 
 function formatDateTime(value) {
@@ -242,6 +264,26 @@ function formatDateTime(value) {
     timeStyle: 'short',
     timeZone: 'Europe/Bucharest'
   });
+}
+
+function formatDateTimeLocalInputValue(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const pad = number => String(number).padStart(2, '0');
+  const year = date.getFullYear();
+  const month = pad(date.getMonth() + 1);
+  const day = pad(date.getDate());
+  const hours = pad(date.getHours());
+  const minutes = pad(date.getMinutes());
+  return `${year}-${month}-${day}T${hours}:${minutes}`;
+}
+
+function parseDateTimeLocalInputValue(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString();
 }
 
 function closeAllCustomSelects() {
@@ -737,7 +779,7 @@ document.addEventListener('keydown', event => {
   }
 });
 
-function showModal({ message, withInput = false, inputValue = '', confirmLabel = 'OK', inputType = 'text', label1 = '', withSecondInput = false, secondInputValue = '', secondInputType = 'text', label2 = '' }) {
+function showModal({ message, withInput = false, inputValue = '', confirmLabel = 'OK', inputType = 'text', label1 = '', withSecondInput = false, secondInputValue = '', secondInputType = 'text', label2 = '', withThirdInput = false, thirdInputValue = '', thirdInputType = 'text', label3 = '' }) {
   return new Promise(resolve => {
     modalMessage.textContent = message;
     modalConfirm.textContent = confirmLabel;
@@ -754,6 +796,12 @@ function showModal({ message, withInput = false, inputValue = '', confirmLabel =
     modalInput2.type = secondInputType;
     modalInput2.classList.toggle('hidden', !withSecondInput);
 
+    modalLabel3.textContent = label3;
+    modalLabel3.classList.toggle('hidden', !label3);
+    modalInput3.value = thirdInputValue;
+    modalInput3.type = thirdInputType;
+    modalInput3Wrap.classList.toggle('hidden', !withThirdInput);
+
     modalOverlay.classList.remove('hidden');
     if (withInput) setTimeout(() => modalInput.focus(), 25);
 
@@ -766,8 +814,12 @@ function showModal({ message, withInput = false, inputValue = '', confirmLabel =
     }
 
     function onConfirm() {
-      if (withSecondInput) {
-        cleanup({ first: modalInput.value.trim(), second: modalInput2.value.trim() });
+      if (withSecondInput || withThirdInput) {
+        cleanup({
+          first: modalInput.value.trim(),
+          second: modalInput2.value.trim(),
+          third: modalInput3.value.trim()
+        });
       } else {
         cleanup(withInput ? modalInput.value.trim() : true);
       }
@@ -785,6 +837,17 @@ function showModal({ message, withInput = false, inputValue = '', confirmLabel =
     modalConfirm.addEventListener('click', onConfirm);
     modalCancel.addEventListener('click', onCancel);
     document.addEventListener('keydown', onKeyDown);
+  });
+}
+
+if (modalInput3Trigger && modalInput3) {
+  modalInput3Trigger.addEventListener('click', () => {
+    if (typeof modalInput3.showPicker === 'function') {
+      modalInput3.showPicker();
+      return;
+    }
+    modalInput3.focus();
+    modalInput3.click();
   });
 }
 
@@ -1577,6 +1640,8 @@ function appendItem(item) {
   const sourceItemId = item.sourceItemId || item.id;
   const favouriteKey = getFavouriteRefKey(sourceWallId, sourceItemId);
   const isFavourite = item.isFavourite === true || favouriteRefSet.has(favouriteKey);
+  const isEveryone = item.isEveryone === true && currentWallId !== EVERYONE_WALL_ID;
+  const isMirroredEveryoneItem = currentWallId === EVERYONE_WALL_ID && Boolean(item.sourceWallId && item.sourceItemId);
 
   const wrapper = document.createElement('div');
   wrapper.className = 'media-item';
@@ -1680,10 +1745,20 @@ function appendItem(item) {
 
   const favouriteButton = document.createElement('button');
   favouriteButton.className = 'fav-btn';
-  setFavouriteButtonState(favouriteButton, isFavourite);
+  setFavouriteButtonState(favouriteButton, isFavourite, 'favourite', false);
   favouriteButton.addEventListener('click', event => {
     event.stopPropagation();
+    if (favouriteButton.dataset.mode === 'everyone') {
+      toggleEveryone(item, wrapper, favouriteButton);
+      return;
+    }
     toggleFavourite(item, wrapper, favouriteButton);
+  });
+  favouriteButton.addEventListener('contextmenu', event => {
+    event.preventDefault();
+    event.stopPropagation();
+    const nextMode = favouriteButton.dataset.mode === 'everyone' ? 'favourite' : 'everyone';
+    setFavouriteButtonState(favouriteButton, isFavourite, nextMode, Boolean(item.isEveryone));
   });
 
   const infoButton = document.createElement('button');
@@ -1727,7 +1802,10 @@ function appendItem(item) {
   if (favouritesWallOpen) {
     overlay.append(downloadButton, favouriteButton, infoButton);
   } else {
-    overlay.append(downloadButton, favouriteButton, infoButton, editButton, deleteButton);
+    overlay.append(downloadButton, favouriteButton, infoButton, editButton);
+    if (!isMirroredEveryoneItem) {
+      overlay.append(deleteButton);
+    }
   }
   wrapper.append(mediaThumb, dragHandle, ownerBadge, overlay);
   makeItemSortable(wrapper, dragHandle);
@@ -1779,8 +1857,32 @@ async function toggleFavourite(item, element, button) {
     }
 
     if (button && button.isConnected) {
-      setFavouriteButtonState(button, !isFavourite);
+      setFavouriteButtonState(button, !isFavourite, 'favourite');
     }
+  } catch (error) {
+    alert(error.message);
+  }
+}
+
+async function toggleEveryone(item, element, button) {
+  const sourceWallId = item.sourceWallId || element.dataset.sourceWallId || currentWallId;
+  const sourceItemId = item.sourceItemId || element.dataset.sourceItemId || item.id;
+  const key = getFavouriteRefKey(sourceWallId, sourceItemId);
+
+  try {
+    if (item.isEveryone) {
+      await api('DELETE', '/api/everyone', { wallId: sourceWallId, itemId: sourceItemId });
+      item.isEveryone = false;
+    } else {
+      await api('POST', '/api/everyone', { wallId: sourceWallId, itemId: sourceItemId });
+      item.isEveryone = true;
+    }
+
+    if (button && button.isConnected) {
+      setFavouriteButtonState(button, favouriteRefSet.has(key), 'everyone', item.isEveryone);
+    }
+
+    showEveryoneNotification(item.isEveryone);
   } catch (error) {
     alert(error.message);
   }
@@ -1819,6 +1921,10 @@ async function editItem(item, element) {
     withSecondInput: true,
     secondInputValue: item.caption || '',
     label2: 'Caption',
+    withThirdInput: true,
+    thirdInputValue: formatDateTimeLocalInputValue(item.exifDate || item.uploadedAt),
+    thirdInputType: 'datetime-local',
+    label3: 'Date & time',
     confirmLabel: 'Save'
   });
 
@@ -1826,14 +1932,19 @@ async function editItem(item, element) {
 
   const newName = result.first.trim();
   const newCaption = result.second;
+  const newDateTime = parseDateTimeLocalInputValue(result.third) || item.exifDate || item.uploadedAt;
 
   try {
     await api('PATCH', `/api/walls/${currentWallId}/items/${item.id}`, {
       originalName: newName || item.originalName,
-      caption: newCaption
+      caption: newCaption,
+      exifDate: newDateTime,
+      exifSource: 'manual'
     });
     if (newName) item.originalName = newName;
     item.caption = newCaption;
+    item.exifDate = newDateTime;
+    item.exifSource = 'manual';
 
     element.dataset.search = `${String(item.originalName || '').toLowerCase()} ${String(item.caption || '').toLowerCase()}`;
     element.dataset.mentions = extractMentions(item.caption).join(',');
@@ -1874,6 +1985,8 @@ function showInfoModal(item) {
       ? ' <em style="color:var(--text-muted); font-size:.85em;">(from file date)</em>'
       : item.exifSource === 'filename'
         ? ' <em style="color:var(--text-muted); font-size:.85em;">(from filename)</em>'
+      : item.exifSource === 'manual'
+        ? ' <em style="color:var(--text-muted); font-size:.85em;">(edited manually)</em>'
       : '';
   const sourceWall = item.sourceWallName ? `<div class="info-row"><span class="info-label">Source wall</span><span class="info-value">${escapeHtml(item.sourceWallName)}</span></div>` : '';
 
@@ -2055,6 +2168,9 @@ function renderUploadPreview() {
 
 function openTempPreview(entry) {
   lightboxContent.innerHTML = '';
+  lightboxShareControls.classList.add('hidden');
+  lightboxShareDeleteBtn.classList.add('hidden');
+  lightboxShareBtn.innerHTML = '<i class="fa-solid fa-link"></i><span>Create</span>';
 
   let media;
   const type = String(entry.file?.type || '');
@@ -2334,6 +2450,7 @@ document.addEventListener('dragend', () => {
 
 function openLightbox(item) {
   lightboxContent.innerHTML = '';
+  lightboxShareControls.classList.remove('hidden');
   shareState.currentItem = item;
   // reset UI while we check for existing share
   if (shareState.countdownInterval) {
@@ -2352,21 +2469,18 @@ function openLightbox(item) {
         shareState.currentCode = data.code;
         shareState.expiresAt = data.expiresAt;
         startShareCountdown();
-            lightboxShareDeleteBtn.classList.remove('hidden');
-            if (globalShareDeleteBtn) globalShareDeleteBtn.classList.remove('hidden');
+        lightboxShareDeleteBtn.classList.remove('hidden');
       } else {
         // no existing share
         shareState.currentCode = null;
         shareState.expiresAt = null;
         lightboxShareBtn.innerHTML = '<i class="fa-solid fa-link"></i><span>Create</span>';
-        if (globalShareDeleteBtn) globalShareDeleteBtn.classList.add('hidden');
       }
     } catch (err) {
       console.error('Error checking existing share:', err);
       shareState.currentCode = null;
       shareState.expiresAt = null;
       lightboxShareBtn.innerHTML = '<i class="fa-solid fa-link"></i><span>Create</span>';
-      if (globalShareDeleteBtn) globalShareDeleteBtn.classList.add('hidden');
     }
   })();
 
@@ -2411,6 +2525,46 @@ function showShareNotification(link) {
   shareNotification.classList.remove('hidden');
   setTimeout(() => {
     shareNotification.classList.add('hidden');
+  }, 3000);
+}
+
+function showEveryoneNotification(isEveryoneAdded) {
+  if (!everyoneNotification) return;
+
+  if (everyoneNotificationTimeout) {
+    clearTimeout(everyoneNotificationTimeout);
+    everyoneNotificationTimeout = null;
+  }
+
+  if (isEveryoneAdded) {
+    everyoneNotification.innerHTML = 'File added to <button type="button" id="everyone-toast-link" class="toast-link">@everyone</button>';
+  } else {
+    everyoneNotification.textContent = 'File removed from @everyone';
+  }
+
+  everyoneNotification.classList.remove('hidden');
+  everyoneNotification.style.cursor = isEveryoneAdded ? 'pointer' : 'default';
+
+  const openEveryoneWall = event => {
+    if (event) event.preventDefault();
+    openWall(EVERYONE_WALL_ID).catch(() => {});
+  };
+
+  if (isEveryoneAdded) {
+    const toastLink = document.getElementById('everyone-toast-link');
+    if (toastLink) {
+      toastLink.addEventListener('click', async event => {
+        event.preventDefault();
+        openEveryoneWall(event);
+      }, { once: true });
+    }
+  }
+
+  everyoneNotificationTimeout = setTimeout(() => {
+    everyoneNotification.classList.add('hidden');
+    everyoneNotification.textContent = '';
+    everyoneNotification.style.cursor = '';
+    everyoneNotificationTimeout = null;
   }, 3000);
 }
 
@@ -2464,7 +2618,6 @@ async function handleShareDelete() {
     shareState.expiresAt = null;
     lightboxShareBtn.innerHTML = '<i class="fa-solid fa-link"></i><span>Create</span>';
     lightboxShareDeleteBtn.classList.add('hidden');
-    if (globalShareDeleteBtn) globalShareDeleteBtn.classList.add('hidden');
   } catch (err) {
     console.error('Failed to delete share:', err);
     alert('Failed to delete share link');
@@ -2518,6 +2671,7 @@ async function handleShareClick() {
 
     // Inizia countdown
     startShareCountdown();
+    lightboxShareDeleteBtn.classList.remove('hidden');
   } catch (error) {
     console.error('Share error:', error);
     alert('Failed to create share link');
@@ -2534,7 +2688,6 @@ function closeLightbox() {
 lightboxClose.addEventListener('click', closeLightbox);
 lightboxShareBtn.addEventListener('click', handleShareClick);
 lightboxShareDeleteBtn.addEventListener('click', handleShareDelete);
-if (globalShareDeleteBtn) globalShareDeleteBtn.addEventListener('click', handleShareDelete);
 lightbox.addEventListener('click', event => {
   if (event.target === lightbox) closeLightbox();
 });

@@ -35,7 +35,10 @@ function normalizeDB(data) {
           uploadedAt: item.uploadedAt || new Date().toISOString(),
           uploadedBy: item.uploadedBy || wall.owner || 'Unknown',
           exifDate: item.exifDate || null,
-          exifSource: item.exifSource || null
+          exifSource: item.exifSource || null,
+          sourceWallId: item.sourceWallId || null,
+          sourceItemId: item.sourceItemId || null,
+          everyoneAddedAt: item.everyoneAddedAt || null
         }))
       : []
   }));

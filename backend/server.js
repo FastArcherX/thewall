@@ -265,6 +265,27 @@ function findItemByReference(db, ref) {
   return { sourceWall, sourceItem };
 }
 
+function getEveryoneWall(db) {
+  return getWallById(db, EVERYONE_WALL_ID);
+}
+
+function getEveryoneRefKey(wallId, itemId) {
+  return `${wallId}::${itemId}`;
+}
+
+function getEveryoneRefSet(db) {
+  const everyoneWall = getEveryoneWall(db);
+  return new Set((everyoneWall?.items || [])
+    .filter(item => item.sourceWallId && item.sourceItemId)
+    .map(item => getEveryoneRefKey(item.sourceWallId, item.sourceItemId)));
+}
+
+function findEveryoneItemByReference(db, wallId, itemId) {
+  const everyoneWall = getEveryoneWall(db);
+  if (!everyoneWall) return null;
+  return everyoneWall.items.find(item => item.sourceWallId === wallId && item.sourceItemId === itemId) || null;
+}
+
 function findUserByName(db, name) {
   return db.users.find(user => normalizeName(user.name) === normalizeName(name));
 }
@@ -659,6 +680,7 @@ app.delete('/api/favourites', requireAuth, (req, res) => {
 
 app.get('/api/walls/:wallId/items', requireAuth, (req, res) => {
   const db = loadDB();
+  const everyoneRefSet = getEveryoneRefSet(db);
 
   if (isUserFavouritesWallId(req.params.wallId, req.session.user.name)) {
     const entry = ensureUserFavouritesEntry(db, req.session.user.name);
@@ -672,7 +694,8 @@ app.get('/api/walls/:wallId/items', requireAuth, (req, res) => {
         sourceWallId: ref.wallId,
         sourceWallName: found.sourceWall.name,
         sourceItemId: ref.itemId,
-        isFavourite: true
+        isFavourite: true,
+        isEveryone: everyoneRefSet.has(`${ref.wallId}::${ref.itemId}`)
       };
     }).filter(Boolean);
 
@@ -699,10 +722,85 @@ app.get('/api/walls/:wallId/items', requireAuth, (req, res) => {
   const favouriteKeys = new Set((entry?.items || []).map(getFavouriteRefKey));
   const items = wall.items.map(item => ({
     ...item,
-    isFavourite: favouriteKeys.has(`${wall.id}::${item.id}`)
+    isFavourite: favouriteKeys.has(`${wall.id}::${item.id}`),
+    isEveryone: wall.id === EVERYONE_WALL_ID ? true : everyoneRefSet.has(`${wall.id}::${item.id}`)
   }));
 
   res.json(items);
+});
+
+app.post('/api/everyone', requireAuth, (req, res) => {
+  const wallId = String(req.body?.wallId || '').trim();
+  const itemId = String(req.body?.itemId || '').trim();
+
+  if (!wallId || !itemId) {
+    return res.status(400).json({ error: 'wallId and itemId are required' });
+  }
+
+  if (isUserFavouritesWallId(wallId, req.session.user.name) || wallId === EVERYONE_WALL_ID) {
+    return res.status(400).json({ error: 'Cannot share from this wall' });
+  }
+
+  const db = loadDB();
+  const sourceWall = getWallById(db, wallId);
+  if (!sourceWall) return res.status(404).json({ error: 'Source wall not found' });
+  if (!canUserAccessWall(db, sourceWall, req.session.user.name)) {
+    return res.status(403).json({ error: 'Access denied to source wall' });
+  }
+
+  const sourceItem = sourceWall.items.find(item => item.id === itemId);
+  if (!sourceItem) return res.status(404).json({ error: 'Source item not found' });
+
+  const everyoneWall = getEveryoneWall(db);
+  if (!everyoneWall) return res.status(404).json({ error: '@everyone wall not found' });
+
+  const alreadyAdded = everyoneWall.items.some(item => item.sourceWallId === wallId && item.sourceItemId === itemId);
+  if (!alreadyAdded) {
+    everyoneWall.items.push({
+      id: uuidv4(),
+      filename: sourceItem.filename,
+      originalName: sourceItem.originalName || sourceItem.filename,
+      mimetype: sourceItem.mimetype || 'application/octet-stream',
+      caption: sourceItem.caption || '',
+      uploadedAt: sourceItem.uploadedAt || new Date().toISOString(),
+      uploadedBy: sourceItem.uploadedBy || sourceWall.owner || 'Unknown',
+      exifDate: sourceItem.exifDate || null,
+      exifSource: sourceItem.exifSource || null,
+      sourceWallId: wallId,
+      sourceItemId: itemId,
+      everyoneAddedAt: new Date().toISOString()
+    });
+    saveDB(db);
+  }
+
+  res.json({ success: true, isEveryone: true });
+});
+
+app.delete('/api/everyone', requireAuth, (req, res) => {
+  const wallId = String(req.body?.wallId || req.query?.wallId || '').trim();
+  const itemId = String(req.body?.itemId || req.query?.itemId || '').trim();
+
+  if (!wallId || !itemId) {
+    return res.status(400).json({ error: 'wallId and itemId are required' });
+  }
+
+  if (isUserFavouritesWallId(wallId, req.session.user.name) || wallId === EVERYONE_WALL_ID) {
+    return res.status(400).json({ error: 'Cannot remove from this wall' });
+  }
+
+  const db = loadDB();
+  const everyoneWall = getEveryoneWall(db);
+  if (!everyoneWall) return res.status(404).json({ error: '@everyone wall not found' });
+
+  const existingIndex = everyoneWall.items.findIndex(item => item.sourceWallId === wallId && item.sourceItemId === itemId);
+  if (existingIndex === -1) {
+    return res.status(404).json({ error: 'Item not found in @everyone' });
+  }
+
+  everyoneWall.items.splice(existingIndex, 1);
+  saveDB(db);
+
+  res.json({ success: true, isEveryone: false });
 });
 
 app.post('/api/walls/:wallId/items', requireAuth, upload.single('file'), (req, res) => {
@@ -876,6 +974,20 @@ app.delete('/api/walls/:wallId/items/:itemId', requireAuth, (req, res) => {
   const idx = wall.items.findIndex(i => i.id === req.params.itemId);
   if (idx === -1) return res.status(404).json({ error: 'Item not found' });
   const [item] = wall.items.splice(idx, 1);
+
+  // Mirrored @everyone items are managed from their source wall only.
+  if (isEveryoneWall(wall) && item.sourceWallId && item.sourceItemId) {
+    wall.items.splice(idx, 0, item);
+    return res.status(403).json({ error: 'Cannot delete mirrored @everyone item directly' });
+  }
+
+  if (!isEveryoneWall(wall)) {
+    const everyoneWall = getEveryoneWall(db);
+    if (everyoneWall) {
+      everyoneWall.items = everyoneWall.items.filter(entry => !(entry.sourceWallId === req.params.wallId && entry.sourceItemId === req.params.itemId));
+    }
+  }
+
   const filePath = path.join(UPLOADS_DIR, item.filename);
   if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
   db.favourites.forEach(entry => {
@@ -890,7 +1002,7 @@ app.patch('/api/walls/:wallId/items/:itemId', requireAuth, (req, res) => {
     return res.status(403).json({ error: 'Cannot edit items from Favourites wall' });
   }
 
-  const { caption, originalName } = req.body;
+  const { caption, originalName, exifDate, exifSource } = req.body;
   const db = loadDB();
   const wall = getWallById(db, req.params.wallId);
   if (!wall) return res.status(404).json({ error: 'Wall not found' });
@@ -903,6 +1015,14 @@ app.patch('/api/walls/:wallId/items/:itemId', requireAuth, (req, res) => {
   if (typeof caption === 'string') item.caption = caption;
   if (typeof originalName === 'string' && originalName.trim()) {
     item.originalName = sanitizeUploadDisplayName(originalName.trim(), item.originalName);
+  }
+  if (typeof exifDate === 'string' && exifDate.trim()) {
+    const parsed = new Date(exifDate);
+    if (Number.isNaN(parsed.getTime())) {
+      return res.status(400).json({ error: 'Invalid date and time' });
+    }
+    item.exifDate = parsed.toISOString();
+    item.exifSource = typeof exifSource === 'string' && exifSource.trim() ? exifSource.trim() : 'manual';
   }
   if (typeof caption === 'string') {
     notifyMentions(db, wall, req.session.user.name, previousCaption, item.caption || '');
