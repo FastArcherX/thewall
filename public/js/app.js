@@ -2828,12 +2828,6 @@ async function handleWallShareClick() {
 async function handleWallShareDelete() {
   if (!currentWallId || !wallShareState.code || wallShareState.wallId !== currentWallId) return;
 
-  const confirmed = await showModal({
-    message: 'Delete the share link for this wall? Visitors will lose access.',
-    confirmLabel: 'Delete'
-  });
-  if (!confirmed) return;
-
   try {
     await api('DELETE', `/api/sharewall?code=${encodeURIComponent(wallShareState.code)}`);
     stopWallShareCountdown();
