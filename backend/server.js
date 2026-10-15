@@ -1248,7 +1248,7 @@ app.post('/api/sharewall', requireAuth, (req, res) => {
 
   // Generate random share code (8 characters)
   const code = Math.random().toString(36).substring(2, 10);
-  const expiresAt = Date.now() + (5 * 24 * 60 * 60 * 1000); // 5 days
+  const expiresAt = Date.now() + (3 * 24 * 60 * 60 * 1000); // 3 days
 
   wallShares.set(code, { wallId, expiresAt });
   persistWallShares();

@@ -62,6 +62,7 @@ const changeIconBtn = document.getElementById('change-icon-btn');
 const renameWallBtn = document.getElementById('rename-wall-btn');
 const deleteWallBtn = document.getElementById('delete-wall-btn');
 const shareWallBtn = document.getElementById('share-wall-btn');
+const shareWallDeleteBtn = document.getElementById('share-wall-delete-btn');
 const uploadArea = document.getElementById('upload-area');
 const fileInput = document.getElementById('file-input');
 const captionInput = document.getElementById('caption-input');
@@ -143,7 +144,8 @@ const shareState = {
 const wallShareState = {
   wallId: null,
   code: null,
-  expiresAt: null
+  expiresAt: null,
+  countdownInterval: null
 };
 
 let wallShareToastTimeout = null;
@@ -2704,9 +2706,57 @@ function updateWallShareButton() {
   if (!shareWallBtn) return;
   const active = Boolean(wallShareState.code && wallShareState.expiresAt && Date.now() < wallShareState.expiresAt);
   shareWallBtn.classList.toggle('active', active);
+  if (shareWallDeleteBtn) shareWallDeleteBtn.classList.toggle('hidden', !active);
+  if (!active && shareWallBtn) {
+    shareWallBtn.innerHTML = '<i class="fa-solid fa-share-nodes"></i>';
+    shareWallBtn.title = 'Share wall as read-only gallery';
+  }
+}
+
+function updateWallShareCountdown() {
+  if (!wallShareState.expiresAt) return;
+
+  const now = Date.now();
+  const remaining = Math.max(0, wallShareState.expiresAt - now);
+
+  if (remaining === 0) {
+    // Link expired - remove persisted share on backend
+    if (wallShareState.countdownInterval) {
+      clearInterval(wallShareState.countdownInterval);
+      wallShareState.countdownInterval = null;
+    }
+    if (wallShareState.code) {
+      fetch(`/api/sharewall?code=${encodeURIComponent(wallShareState.code)}`, { method: 'DELETE' }).catch(() => {});
+    }
+    wallShareState.code = null;
+    wallShareState.expiresAt = null;
+    updateWallShareButton();
+  } else {
+    const days = Math.floor(remaining / (1000 * 60 * 60 * 24));
+    const hours = Math.floor((remaining % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+    const minutes = Math.floor((remaining % (1000 * 60 * 60)) / (1000 * 60));
+    const seconds = Math.floor((remaining % (1000 * 60)) / 1000);
+    const timeStr = `${days}d ${hours}h ${minutes}m ${seconds}s`;
+    shareWallBtn.innerHTML = `<i class="fa-solid fa-share-nodes"></i><span>${timeStr}</span>`;
+    shareWallBtn.title = `Wall share link expires in ${timeStr} - click to copy`;
+  }
+}
+
+function startWallShareCountdown() {
+  if (wallShareState.countdownInterval) clearInterval(wallShareState.countdownInterval);
+  updateWallShareCountdown();
+  wallShareState.countdownInterval = setInterval(updateWallShareCountdown, 1000);
+}
+
+function stopWallShareCountdown() {
+  if (wallShareState.countdownInterval) {
+    clearInterval(wallShareState.countdownInterval);
+    wallShareState.countdownInterval = null;
+  }
 }
 
 async function loadWallShare(wallId) {
+  stopWallShareCountdown();
   wallShareState.wallId = wallId;
   wallShareState.code = null;
   wallShareState.expiresAt = null;
@@ -2716,6 +2766,7 @@ async function loadWallShare(wallId) {
     const data = await api('GET', `/api/sharewall?wallId=${encodeURIComponent(wallId)}`);
     wallShareState.code = data.code;
     wallShareState.expiresAt = data.expiresAt;
+    startWallShareCountdown();
   } catch {
     // No active share for this wall - button stays inactive
   }
@@ -2765,6 +2816,7 @@ async function handleWallShareClick() {
     wallShareState.wallId = currentWallId;
     wallShareState.code = data.code;
     wallShareState.expiresAt = data.expiresAt;
+    startWallShareCountdown();
     updateWallShareButton();
     await copyWallShareLink(data.code);
   } catch (error) {
@@ -2784,6 +2836,7 @@ async function handleWallShareDelete() {
 
   try {
     await api('DELETE', `/api/sharewall?code=${encodeURIComponent(wallShareState.code)}`);
+    stopWallShareCountdown();
     wallShareState.code = null;
     wallShareState.expiresAt = null;
     updateWallShareButton();
@@ -2798,6 +2851,12 @@ function appendSharedItem(item, code) {
   const wrapper = document.createElement('div');
   wrapper.className = 'media-item';
   wrapper.dataset.id = item.id;
+  wrapper.dataset.search = `${String(item.originalName || '').toLowerCase()} ${String(item.caption || '').toLowerCase()}`;
+  wrapper.dataset.mentions = extractMentions(item.caption).join(',');
+  wrapper.dataset.publisher = String(item.uploadedBy || 'Unknown');
+  wrapper.dataset.fileType = getItemType(item.mimetype);
+  wrapper.dataset.titleRaw = String(item.originalName || '');
+  wrapper.dataset.captionRaw = String(item.caption || '');
 
   const mediaThumb = document.createElement('div');
   mediaThumb.className = 'media-thumb';
@@ -2871,13 +2930,13 @@ function appendSharedItem(item, code) {
 
   const title = document.createElement('p');
   title.className = 'item-title';
-  title.textContent = item.originalName || '';
+  title.innerHTML = formatTextHtml(item.originalName || '', { highlightTerm: searchInput.value });
   wrapper.appendChild(title);
 
   if (item.caption && item.caption.trim()) {
     const caption = document.createElement('p');
     caption.className = 'item-caption';
-    caption.textContent = item.caption;
+    caption.innerHTML = formatTextHtml(item.caption, { highlightTerm: searchInput.value, mentionAware: true, highlightedMention: filterMention.value });
     wrapper.appendChild(caption);
   }
 
@@ -2940,14 +2999,21 @@ async function showSharedWall(code) {
   for (const item of data.items || []) {
     appendSharedItem(item, code);
   }
+
+  // Enable search + filters on the shared gallery (read-only)
+  searchInput.value = '';
+  filterMention.value = '';
+  filterPublisher.value = '';
+  filterType.value = '';
+  syncFiltersFromItems();
+  applyMediaFilters();
 }
 
 if (shareWallBtn) {
   shareWallBtn.addEventListener('click', handleWallShareClick);
-  shareWallBtn.addEventListener('contextmenu', event => {
-    event.preventDefault();
-    handleWallShareDelete();
-  });
+}
+if (shareWallDeleteBtn) {
+  shareWallDeleteBtn.addEventListener('click', handleWallShareDelete);
 }
 
 function closeLightbox() {

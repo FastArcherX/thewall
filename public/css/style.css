@@ -1681,13 +1681,18 @@ html > div#detach-button-host {
   border-color: var(--accent);
 }
 
-/* Public read-only shared gallery: no sidebar, no upload, no actions, no filters */
+/* Public read-only shared gallery: no sidebar, no upload controls, no wall
+   actions. Search + filters stay visible (read-only). */
 body.shared-mode #sidebar,
-body.shared-mode #upload-area,
 body.shared-mode #wall-actions,
-body.shared-mode #search-area,
 body.shared-mode #sound-toggle-btn,
 body.shared-mode #undo-container,
-body.shared-mode #multi-select-container {
+body.shared-mode #multi-select-container,
+body.shared-mode #upload-label,
+body.shared-mode #caption-input,
+body.shared-mode #caption-mention-menu,
+body.shared-mode #upload-btn,
+body.shared-mode #upload-progress,
+body.shared-mode #upload-preview {
   display: none !important;
 }
