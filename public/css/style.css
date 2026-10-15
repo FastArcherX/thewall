@@ -1674,3 +1674,20 @@ html > div#detach-button-host {
 
 @media (max-width: 560px) {
 }
+
+/* ── Whole-wall share ─────────────────────────────────────────────────────── */
+#share-wall-btn.active {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* Public read-only shared gallery: no sidebar, no upload, no actions, no filters */
+body.shared-mode #sidebar,
+body.shared-mode #upload-area,
+body.shared-mode #wall-actions,
+body.shared-mode #search-area,
+body.shared-mode #sound-toggle-btn,
+body.shared-mode #undo-container,
+body.shared-mode #multi-select-container {
+  display: none !important;
+}

@@ -61,6 +61,7 @@ const editAccessBtn = document.getElementById('edit-access-btn');
 const changeIconBtn = document.getElementById('change-icon-btn');
 const renameWallBtn = document.getElementById('rename-wall-btn');
 const deleteWallBtn = document.getElementById('delete-wall-btn');
+const shareWallBtn = document.getElementById('share-wall-btn');
 const uploadArea = document.getElementById('upload-area');
 const fileInput = document.getElementById('file-input');
 const captionInput = document.getElementById('caption-input');
@@ -138,6 +139,14 @@ const shareState = {
   expiresAt: null,
   countdownInterval: null
 };
+
+const wallShareState = {
+  wallId: null,
+  code: null,
+  expiresAt: null
+};
+
+let wallShareToastTimeout = null;
 
 let everyoneNotificationTimeout = null;
 
@@ -987,6 +996,16 @@ async function init() {
   initOperaOverlayBlocker();
   initSoundToggle();
   initCustomFilterSelects();
+  // Public read-only shared gallery - no login required
+  const sharedMatch = window.location.pathname.match(/^\/wall-shared\/([A-Za-z0-9]+)/);
+  if (sharedMatch) {
+    try {
+      await loadWallIcons();
+    } catch {
+    }
+    await showSharedWall(sharedMatch[1]);
+    return;
+  }
   try {
     await loadWallIcons();
     const me = await api('GET', '/api/me');
@@ -1381,6 +1400,7 @@ async function openWall(wallId) {
   mediaGrid.style.columnFill = '';
   renderWallsList();
   await loadItems();
+  loadWallShare(wallId);
 }
 
 function showEmojiPicker(initialIconId) {
@@ -2676,6 +2696,258 @@ async function handleShareClick() {
     console.error('Share error:', error);
     alert('Failed to create share link');
   }
+}
+
+/* ── Whole-wall share (read-only gallery) ─────────────────────────────────── */
+
+function updateWallShareButton() {
+  if (!shareWallBtn) return;
+  const active = Boolean(wallShareState.code && wallShareState.expiresAt && Date.now() < wallShareState.expiresAt);
+  shareWallBtn.classList.toggle('active', active);
+}
+
+async function loadWallShare(wallId) {
+  wallShareState.wallId = wallId;
+  wallShareState.code = null;
+  wallShareState.expiresAt = null;
+  updateWallShareButton();
+  if (!wallId) return;
+  try {
+    const data = await api('GET', `/api/sharewall?wallId=${encodeURIComponent(wallId)}`);
+    wallShareState.code = data.code;
+    wallShareState.expiresAt = data.expiresAt;
+  } catch {
+    // No active share for this wall - button stays inactive
+  }
+  updateWallShareButton();
+}
+
+function showWallShareToast(link) {
+  if (!everyoneNotification) {
+    alert(`Link: ${link}`);
+    return;
+  }
+  if (wallShareToastTimeout) {
+    clearTimeout(wallShareToastTimeout);
+    wallShareToastTimeout = null;
+  }
+  everyoneNotification.textContent = `${link} copiato`;
+  everyoneNotification.classList.remove('hidden');
+  wallShareToastTimeout = setTimeout(() => {
+    everyoneNotification.classList.add('hidden');
+    everyoneNotification.textContent = '';
+    wallShareToastTimeout = null;
+  }, 3000);
+}
+
+async function copyWallShareLink(code) {
+  const link = `${window.location.origin}/wall-shared/${code}`;
+  try {
+    await navigator.clipboard.writeText(link);
+    showWallShareToast(link);
+  } catch (err) {
+    console.error('Failed to copy to clipboard:', err);
+    alert(`Link: ${link}`);
+  }
+}
+
+async function handleWallShareClick() {
+  if (!currentWallId) return;
+
+  // Valid share already exists - just copy the link again
+  if (wallShareState.wallId === currentWallId && wallShareState.code && wallShareState.expiresAt && Date.now() < wallShareState.expiresAt) {
+    await copyWallShareLink(wallShareState.code);
+    return;
+  }
+
+  try {
+    const data = await api('POST', '/api/sharewall', { wallId: currentWallId });
+    wallShareState.wallId = currentWallId;
+    wallShareState.code = data.code;
+    wallShareState.expiresAt = data.expiresAt;
+    updateWallShareButton();
+    await copyWallShareLink(data.code);
+  } catch (error) {
+    console.error('Wall share error:', error);
+    alert(error.message || 'Failed to create wall share link');
+  }
+}
+
+async function handleWallShareDelete() {
+  if (!currentWallId || !wallShareState.code || wallShareState.wallId !== currentWallId) return;
+
+  const confirmed = await showModal({
+    message: 'Delete the share link for this wall? Visitors will lose access.',
+    confirmLabel: 'Delete'
+  });
+  if (!confirmed) return;
+
+  try {
+    await api('DELETE', `/api/sharewall?code=${encodeURIComponent(wallShareState.code)}`);
+    wallShareState.code = null;
+    wallShareState.expiresAt = null;
+    updateWallShareButton();
+  } catch (error) {
+    alert(error.message || 'Failed to delete wall share link');
+  }
+}
+
+/* ── Public read-only shared gallery (no login) ───────────────────────────── */
+
+function appendSharedItem(item, code) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'media-item';
+  wrapper.dataset.id = item.id;
+
+  const mediaThumb = document.createElement('div');
+  mediaThumb.className = 'media-thumb';
+
+  let media;
+  const fileUrl = item.fileUrl || `/wall-shared/${encodeURIComponent(code)}/file/${encodeURIComponent(item.id)}`;
+  if (String(item.mimetype || '').startsWith('video/')) {
+    media = document.createElement('video');
+    media.src = fileUrl;
+    media.muted = true;
+    media.loop = true;
+    media.playsInline = true;
+    media.preload = 'metadata';
+    media.draggable = false;
+    media.setAttribute('controlslist', 'nodownload nofullscreen noremoteplayback');
+    mediaThumb.addEventListener('mouseenter', () => { media.play().catch(() => {}); });
+    mediaThumb.addEventListener('mouseleave', () => { media.pause(); media.currentTime = 0; });
+  } else if (String(item.mimetype || '').startsWith('audio/')) {
+    media = document.createElement('div');
+    media.className = 'audio-tile-visual';
+    media.innerHTML = '<i class="fa-solid fa-music"></i><span class="audio-tile-label">Audio</span>';
+    mediaThumb.classList.add('media-thumb-audio');
+  } else {
+    media = document.createElement('img');
+    media.src = fileUrl;
+    media.alt = item.caption || item.originalName;
+    media.loading = 'lazy';
+    media.draggable = false;
+  }
+
+  mediaThumb.appendChild(media);
+  const thumbShield = document.createElement('div');
+  thumbShield.className = 'media-thumb-shield';
+  mediaThumb.appendChild(thumbShield);
+  mediaThumb.addEventListener('click', () => openSharedPreview(item, code));
+
+  const ownerBadge = document.createElement('span');
+  ownerBadge.className = 'item-owner';
+  ownerBadge.textContent = item.uploadedBy || 'Unknown';
+
+  const overlay = document.createElement('div');
+  overlay.className = 'item-overlay';
+
+  const downloadButton = document.createElement('button');
+  downloadButton.className = 'download-btn';
+  downloadButton.title = 'Download file';
+  downloadButton.setAttribute('aria-label', 'Download file');
+  downloadButton.innerHTML = '<i class="fa-solid fa-download"></i>';
+  downloadButton.addEventListener('click', event => {
+    event.stopPropagation();
+    const link = document.createElement('a');
+    link.href = fileUrl;
+    link.download = item.originalName || 'file';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  });
+
+  const infoButton = document.createElement('button');
+  infoButton.className = 'info-btn';
+  infoButton.title = 'File info';
+  infoButton.setAttribute('aria-label', 'File info');
+  infoButton.innerHTML = '<i class="fa-solid fa-circle-info"></i>';
+  infoButton.addEventListener('click', event => {
+    event.stopPropagation();
+    showInfoModal(item);
+  });
+
+  overlay.append(downloadButton, infoButton);
+  wrapper.append(mediaThumb, ownerBadge, overlay);
+
+  const title = document.createElement('p');
+  title.className = 'item-title';
+  title.textContent = item.originalName || '';
+  wrapper.appendChild(title);
+
+  if (item.caption && item.caption.trim()) {
+    const caption = document.createElement('p');
+    caption.className = 'item-caption';
+    caption.textContent = item.caption;
+    wrapper.appendChild(caption);
+  }
+
+  mediaGrid.appendChild(wrapper);
+}
+
+function openSharedPreview(item, code) {
+  const fileUrl = item.fileUrl || `/wall-shared/${encodeURIComponent(code)}/file/${encodeURIComponent(item.id)}`;
+  lightboxContent.innerHTML = '';
+  lightboxShareControls.classList.add('hidden');
+
+  let media;
+  if (String(item.mimetype || '').startsWith('video/')) {
+    media = document.createElement('video');
+    media.src = fileUrl;
+    media.controls = true;
+    media.playsInline = true;
+    media.style.maxWidth = '100%';
+  } else if (String(item.mimetype || '').startsWith('audio/')) {
+    media = document.createElement('audio');
+    media.src = fileUrl;
+    media.controls = true;
+  } else {
+    media = document.createElement('img');
+    media.src = fileUrl;
+    media.alt = item.caption || item.originalName;
+    media.style.maxWidth = '100%';
+  }
+
+  lightboxContent.appendChild(media);
+  lightboxCaption.textContent = item.caption || item.originalName || '';
+  lightboxCaption.classList.toggle('hidden', !lightboxCaption.textContent);
+  document.body.style.overflow = 'hidden';
+  lightbox.classList.remove('hidden');
+}
+
+async function showSharedWall(code) {
+  document.body.classList.add('shared-mode');
+  loginScreen.classList.add('hidden');
+  appScreen.classList.remove('hidden');
+  emptyState.classList.add('hidden');
+  wallView.classList.remove('hidden');
+  mediaGrid.innerHTML = '';
+
+  let data;
+  try {
+    const response = await fetch(`/api/wall-shared/${encodeURIComponent(code)}`);
+    if (!response.ok) throw new Error('not found');
+    data = await response.json();
+  } catch {
+    wallTitle.textContent = '🔗 Shared wall';
+    wallMeta.textContent = 'This link is invalid or has expired.';
+    return;
+  }
+
+  const count = (data.items || []).length;
+  wallTitle.textContent = `${data.wall.icon || '🧱'} ${data.wall.name}`;
+  wallMeta.textContent = `Shared read-only gallery · by ${data.wall.owner} · ${count} item${count === 1 ? '' : 's'}`;
+
+  for (const item of data.items || []) {
+    appendSharedItem(item, code);
+  }
+}
+
+if (shareWallBtn) {
+  shareWallBtn.addEventListener('click', handleWallShareClick);
+  shareWallBtn.addEventListener('contextmenu', event => {
+    event.preventDefault();
+    handleWallShareDelete();
+  });
 }
 
 function closeLightbox() {

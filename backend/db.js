@@ -12,7 +12,16 @@ function normalizeDB(data) {
     favourites: Array.isArray(data?.favourites) ? data.favourites : [],
     operators: Array.isArray(data?.operators) ? data.operators : [],
     notifications: Array.isArray(data?.notifications) ? data.notifications : [],
-    temporaryShares: Array.isArray(data?.temporaryShares) ? data.temporaryShares : []
+    temporaryShares: Array.isArray(data?.temporaryShares) ? data.temporaryShares : [],
+    wallShares: Array.isArray(data?.wallShares)
+      ? data.wallShares
+          .map(s => ({
+            code: String(s?.code || '').trim(),
+            wallId: String(s?.wallId || '').trim(),
+            expiresAt: Number(s?.expiresAt || 0)
+          }))
+          .filter(s => s.code && s.wallId && s.expiresAt > 0)
+      : []
   };
 
   normalized.walls = normalized.walls.map(wall => ({
@@ -85,7 +94,7 @@ function normalizeDB(data) {
 
 function loadDB() {
   if (!fs.existsSync(DB_PATH)) {
-    const initial = { users: [], walls: [], favourites: [], operators: [], notifications: [], temporaryShares: [] };
+    const initial = { users: [], walls: [], favourites: [], operators: [], notifications: [], temporaryShares: [], wallShares: [] };
     fs.writeFileSync(DB_PATH, JSON.stringify(initial, null, 2));
     return normalizeDB(initial);
   }
@@ -93,9 +102,10 @@ function loadDB() {
 }
 
 function saveDB(data) {
-  // preserve temporaryShares if present on data
+  // preserve temporaryShares / wallShares if present on data
   const normalized = normalizeDB(data);
   if (Array.isArray(data.temporaryShares)) normalized.temporaryShares = data.temporaryShares;
+  if (Array.isArray(data.wallShares)) normalized.wallShares = data.wallShares;
   fs.writeFileSync(DB_PATH, JSON.stringify(normalized, null, 2));
 }
 

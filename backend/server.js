@@ -19,6 +19,23 @@ const EVERYONE_WALL_ID = 'wall:everyone';
 // Map to store temporary share codes: code -> { itemId, wallId, expiresAt, filename, mimeType }
 const temporaryShares = new Map();
 
+// Map to store whole-wall share codes: code -> { wallId, expiresAt }
+const wallShares = new Map();
+
+function persistWallShares() {
+  try {
+    const db2 = loadDB();
+    db2.wallShares = Array.from(wallShares.entries()).map(([codeKey, info]) => ({
+      code: codeKey,
+      wallId: info.wallId,
+      expiresAt: info.expiresAt
+    }));
+    saveDB(db2);
+  } catch (err) {
+    console.error('Failed to persist wall share:', err);
+  }
+}
+
 // Load persisted temporary shares from DB (if any)
 try {
   const _db = loadDB();
@@ -38,6 +55,24 @@ try {
   }
 } catch (err) {
   console.error('Failed to load persisted temporary shares:', err);
+}
+
+// Load persisted whole-wall shares from DB (if any)
+try {
+  const _wdb = loadDB();
+  if (Array.isArray(_wdb.wallShares)) {
+    for (const s of _wdb.wallShares) {
+      if (s && s.code && s.wallId) {
+        wallShares.set(s.code, {
+          wallId: s.wallId,
+          expiresAt: s.expiresAt
+        });
+      }
+    }
+    console.log(`Loaded ${wallShares.size} wall share(s) from DB`);
+  }
+} catch (err) {
+  console.error('Failed to load persisted wall shares:', err);
 }
 
 // Ensure uploads directory exists
@@ -1182,6 +1217,137 @@ app.get('/id-shared/:code', (req, res) => {
 
   res.setHeader('Content-Type', shareInfo.mimeType);
   res.setHeader('Content-Disposition', `inline; filename="${path.basename(shareInfo.filename)}"`);
+  res.sendFile(filePath);
+});
+
+// ── Whole-wall share endpoints ──────────────────────────────────────────────
+function getValidWallShare(code) {
+  const info = wallShares.get(code);
+  if (!info) return null;
+  if (Date.now() > info.expiresAt) {
+    wallShares.delete(code);
+    persistWallShares();
+    return null;
+  }
+  return info;
+}
+
+// Create (or renew lookup of) a whole-wall share link
+app.post('/api/sharewall', requireAuth, (req, res) => {
+  const wallId = String(req.body?.wallId || '').trim();
+  if (!wallId) {
+    return res.status(400).json({ error: 'wallId required' });
+  }
+
+  const db = loadDB();
+  const wall = getWallById(db, wallId);
+  if (!wall) return res.status(404).json({ error: 'Wall not found' });
+  if (!canUserAccessWall(db, wall, req.session.user.name)) {
+    return res.status(403).json({ error: 'Access denied to this wall' });
+  }
+
+  // Generate random share code (8 characters)
+  const code = Math.random().toString(36).substring(2, 10);
+  const expiresAt = Date.now() + (5 * 24 * 60 * 60 * 1000); // 5 days
+
+  wallShares.set(code, { wallId, expiresAt });
+  persistWallShares();
+
+  res.json({ code, expiresAt });
+});
+
+// Lookup existing wall share for a wall
+app.get('/api/sharewall', requireAuth, (req, res) => {
+  const wallId = String(req.query?.wallId || '').trim();
+  if (!wallId) return res.status(400).json({ error: 'wallId required' });
+  for (const [code, info] of wallShares.entries()) {
+    if (info.wallId === wallId) {
+      if (Date.now() > info.expiresAt) {
+        wallShares.delete(code);
+        persistWallShares();
+        return res.status(404).json({ error: 'Share not found' });
+      }
+      return res.json({ code, expiresAt: info.expiresAt });
+    }
+  }
+  return res.status(404).json({ error: 'Share not found' });
+});
+
+// Delete a wall share by code (or by wallId via query)
+app.delete('/api/sharewall', requireAuth, (req, res) => {
+  const code = String(req.query?.code || '').trim();
+  const wallId = String(req.query?.wallId || '').trim();
+  let removed = false;
+  if (code) {
+    removed = wallShares.delete(code);
+  } else if (wallId) {
+    for (const [c, info] of wallShares.entries()) {
+      if (info.wallId === wallId) {
+        wallShares.delete(c);
+        removed = true;
+        break;
+      }
+    }
+  } else {
+    return res.status(400).json({ error: 'code or wallId required' });
+  }
+
+  if (removed) {
+    persistWallShares();
+    return res.json({ success: true });
+  }
+  return res.status(404).json({ error: 'Share not found' });
+});
+
+// Public read-only metadata for a shared wall (gallery info, no auth)
+app.get('/api/wall-shared/:code', (req, res) => {
+  const info = getValidWallShare(req.params.code);
+  if (!info) return res.status(404).json({ error: 'Share not found or expired' });
+
+  const db = loadDB();
+  const wall = getWallById(db, info.wallId);
+  if (!wall) return res.status(404).json({ error: 'Wall not found' });
+
+  res.json({
+    wall: {
+      id: wall.id,
+      name: wall.name,
+      icon: wall.icon,
+      owner: wall.owner,
+      createdAt: wall.createdAt
+    },
+    items: (wall.items || []).map(item => ({
+      id: item.id,
+      originalName: item.originalName || item.filename,
+      mimetype: item.mimetype || 'application/octet-stream',
+      caption: item.caption || '',
+      uploadedAt: item.uploadedAt || null,
+      uploadedBy: item.uploadedBy || 'Unknown',
+      exifDate: item.exifDate || null,
+      fileUrl: `/wall-shared/${req.params.code}/file/${item.id}`
+    }))
+  });
+});
+
+// Public read-only file serving for a shared wall (no auth)
+app.get('/wall-shared/:code/file/:itemId', (req, res) => {
+  const info = getValidWallShare(req.params.code);
+  if (!info) return res.status(404).json({ error: 'Share not found or expired' });
+
+  const db = loadDB();
+  const wall = getWallById(db, info.wallId);
+  if (!wall) return res.status(404).json({ error: 'Wall not found' });
+
+  const item = (wall.items || []).find(i => i.id === req.params.itemId);
+  if (!item) return res.status(404).json({ error: 'Item not found' });
+
+  const filePath = path.join(UPLOADS_DIR, item.filename);
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: 'File not found' });
+  }
+
+  res.setHeader('Content-Type', item.mimetype || 'application/octet-stream');
+  res.setHeader('Content-Disposition', `inline; filename="${path.basename(item.filename)}"`);
   res.sendFile(filePath);
 });
 
