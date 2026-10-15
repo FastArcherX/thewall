@@ -1681,6 +1681,34 @@ html > div#detach-button-host {
   border-color: var(--accent);
 }
 
+#share-wall-btn span {
+  margin-left: .45rem;
+}
+
+#share-wall-group {
+  display: inline-flex;
+  align-items: stretch;
+}
+
+/* Fuse delete button to the right side of the countdown pill */
+#share-wall-group:has(#share-wall-delete-btn:not(.hidden)) #share-wall-btn {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+  border-right: none;
+}
+
+#share-wall-group #share-wall-delete-btn {
+  background: rgba(224,92,92,.15);
+  color: var(--danger);
+  border: 1px solid var(--danger);
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+#share-wall-group #share-wall-delete-btn:hover {
+  background: rgba(224,92,92,.28);
+}
+
 /* Public read-only shared gallery: no sidebar, no upload controls, no wall
    actions. Search + filters stay visible (read-only). */
 body.shared-mode #sidebar,
