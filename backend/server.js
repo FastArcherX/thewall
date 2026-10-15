@@ -54,6 +54,7 @@ const storage = multer.diskStorage({
 });
 
 const upload = multer({
+  limits: { fileSize: 2 * 1024 * 1024 * 1024 }, // 2GB max per file
   storage,
   fileFilter: (req, file, cb) => {
     const allowed = /image\/(jpeg|jpg|png|gif|webp|avif|bmp|svg\+xml|x-icon|vnd\.microsoft\.icon)|video\/(mp4|webm|ogg|quicktime|x-msvideo|3gpp|avi|x-matroska)|audio\/(mpeg|mp3|wav|x-wav)/;
@@ -62,8 +63,8 @@ const upload = multer({
   }
 });
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '2gb' }));
+app.use(express.urlencoded({ extended: true, limit: '2gb' }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
 app.use('/uploads', express.static(UPLOADS_DIR));
 
@@ -1185,8 +1186,16 @@ app.get('/id-shared/:code', (req, res) => {
 });
 
 app.use((err, req, res, next) => {
-  if (err instanceof multer.MulterError || err.message) {
-    return res.status(400).json({ error: err.message || 'Upload failed' });
+  if (err instanceof multer.MulterError) {
+    const status = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
+    const message = err.code === 'LIMIT_FILE_SIZE' ? 'File too large (max 2GB)' : (err.message || 'Upload failed');
+    return res.status(status).json({ error: message });
+  }
+  if (err && err.type === 'entity.too.large') {
+    return res.status(413).json({ error: 'Request too large (max 2GB)' });
+  }
+  if (err && err.message) {
+    return res.status(400).json({ error: err.message });
   }
   return next(err);
 });
