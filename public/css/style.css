@@ -1142,6 +1142,25 @@ html > div#detach-button-host {
 #lightbox-share-delete-btn:hover {
   background: rgba(224,92,92,.28);
 }
+
+#lightbox-share-infinite-btn {
+  background: rgba(120,180,255,.15);
+  color: #78b4ff;
+  border: 1px solid #78b4ff;
+  border-radius: 6px;
+  padding: .6rem .9rem;
+  font-size: .9rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all .2s;
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+}
+
+#lightbox-share-infinite-btn:hover {
+  background: rgba(120,180,255,.28);
+}
 #lightbox-content img,
 #lightbox-content video {
   max-width: 90vw;

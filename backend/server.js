@@ -36,7 +36,23 @@ function persistWallShares() {
   }
 }
 
-// Load persisted temporary shares from DB (if any)
+function persistTemporaryShares() {
+  try {
+    const db2 = loadDB();
+    db2.temporaryShares = Array.from(temporaryShares.entries()).map(([codeKey, info]) => ({
+      code: codeKey,
+      itemId: info.itemId,
+      wallId: info.wallId,
+      expiresAt: info.expiresAt,
+      filename: info.filename,
+      mimeType: info.mimeType
+    }));
+    saveDB(db2);
+  } catch (err) {
+    console.error('Failed to persist temporary share:', err);
+  }
+}
+
 try {
   const _db = loadDB();
   if (Array.isArray(_db.temporaryShares)) {
@@ -1122,7 +1138,7 @@ app.get('/api/share', requireAuth, (req, res) => {
   for (const [code, info] of temporaryShares.entries()) {
     if (info.itemId === itemId && info.wallId === wallId) {
       // if expired, remove and return 404
-      if (Date.now() > info.expiresAt) {
+      if (info.expiresAt && Date.now() > info.expiresAt) {
         temporaryShares.delete(code);
         try {
           const db2 = loadDB();
@@ -1180,6 +1196,33 @@ app.delete('/api/share', requireAuth, (req, res) => {
   return res.status(404).json({ error: 'Share not found' });
 });
 
+// Make a temporary share link permanent (no expiry)
+app.post('/api/share/infinite', requireAuth, (req, res) => {
+  const { code, itemId, wallId } = req.body || {};
+  let targetCode = code ? String(code).trim() : '';
+  if (!targetCode && itemId && wallId) {
+    for (const [c, info] of temporaryShares.entries()) {
+      if (info.itemId === itemId && info.wallId === wallId) {
+        targetCode = c;
+        break;
+      }
+    }
+  }
+  const info = temporaryShares.get(targetCode);
+  if (!info) return res.status(404).json({ error: 'Share not found' });
+
+  const db = loadDB();
+  const wall = getWallById(db, info.wallId);
+  if (!wall || !canUserAccessWall(db, wall, req.session.user.name)) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+
+  info.expiresAt = null;
+  temporaryShares.set(targetCode, info);
+  persistTemporaryShares();
+  return res.json({ code: targetCode, expiresAt: null });
+});
+
 // Serve shared file without authentication
 app.get('/id-shared/:code', (req, res) => {
   const { code } = req.params;
@@ -1191,7 +1234,7 @@ app.get('/id-shared/:code', (req, res) => {
   }
 
   // Check if code is expired
-  if (Date.now() > shareInfo.expiresAt) {
+  if (shareInfo.expiresAt && Date.now() > shareInfo.expiresAt) {
     temporaryShares.delete(code);
     try {
       const db2 = loadDB();

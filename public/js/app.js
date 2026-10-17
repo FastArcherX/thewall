@@ -89,6 +89,7 @@ const lightboxCaption = document.getElementById('lightbox-caption');
 const shareNotification = document.getElementById('share-notification');
 const everyoneNotification = document.getElementById('everyone-notification');
 const lightboxShareDeleteBtn = document.getElementById('lightbox-share-delete-btn');
+const lightboxShareInfiniteBtn = document.getElementById('lightbox-share-infinite-btn');
 const modalOverlay = document.getElementById('modal-overlay');
 const modalBox = document.getElementById('modal-box');
 const modalMessage = document.getElementById('modal-message');
@@ -2481,17 +2482,25 @@ function openLightbox(item) {
   }
   lightboxShareBtn.innerHTML = '<i class="fa-solid fa-link"></i><span>...</span>';
   lightboxShareDeleteBtn.classList.add('hidden');
-
-  // Check backend if a share already exists for this item
+  if (lightboxShareInfiniteBtn) lightboxShareInfiniteBtn.classList.add('hidden');
   (async () => {
     try {
       const resp = await fetch(`/api/share?itemId=${encodeURIComponent(item.id)}&wallId=${encodeURIComponent(currentWallId)}`);
       if (resp.ok) {
         const data = await resp.json();
-        shareState.currentCode = data.code;
-        shareState.expiresAt = data.expiresAt;
-        startShareCountdown();
-        lightboxShareDeleteBtn.classList.remove('hidden');
+         shareState.currentCode = data.code;
+         shareState.expiresAt = data.expiresAt;
+         if (data.expiresAt === null) {
+           lightboxShareBtn.innerHTML = '<i class="fa-solid fa-link"></i><span>∞</span>';
+           lightboxShareBtn.title = 'Permanent share link - click to copy';
+         } else {
+           startShareCountdown();
+         }
+         lightboxShareDeleteBtn.classList.remove('hidden');
+         if (lightboxShareInfiniteBtn) {
+           if (data.expiresAt === null) lightboxShareInfiniteBtn.classList.add('hidden');
+           else lightboxShareInfiniteBtn.classList.remove('hidden');
+         }
       } else {
         // no existing share
         shareState.currentCode = null;
@@ -2591,6 +2600,12 @@ function showEveryoneNotification(isEveryoneAdded) {
 }
 
 function updateShareButtonCountdown() {
+  if (shareState.expiresAt === null && shareState.currentCode) {
+    lightboxShareBtn.innerHTML = '<i class="fa-solid fa-link"></i><span>∞</span>';
+    lightboxShareBtn.title = 'Permanent share link - click to copy';
+    if (lightboxShareInfiniteBtn) lightboxShareInfiniteBtn.classList.add('hidden');
+    return;
+  }
   if (!shareState.expiresAt) return;
 
   const now = Date.now();
@@ -2639,10 +2654,35 @@ async function handleShareDelete() {
     shareState.currentCode = null;
     shareState.expiresAt = null;
     lightboxShareBtn.innerHTML = '<i class="fa-solid fa-link"></i><span>Create</span>';
-    lightboxShareDeleteBtn.classList.add('hidden');
+  lightboxShareDeleteBtn.classList.add('hidden');
+  if (lightboxShareInfiniteBtn) lightboxShareInfiniteBtn.classList.add('hidden');
   } catch (err) {
     console.error('Failed to delete share:', err);
     alert('Failed to delete share link');
+  }
+}
+
+async function handleShareInfinite() {
+  if (!shareState.currentItem || !shareState.currentCode) return;
+  try {
+    const response = await fetch('/api/share/infinite', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: shareState.currentCode })
+    });
+    if (!response.ok) throw new Error('Failed to make share permanent');
+    const data = await response.json();
+    shareState.expiresAt = data.expiresAt;
+    if (shareState.countdownInterval) {
+      clearInterval(shareState.countdownInterval);
+      shareState.countdownInterval = null;
+    }
+    lightboxShareBtn.innerHTML = '<i class="fa-solid fa-link"></i><span>∞</span>';
+    lightboxShareBtn.title = 'Permanent share link - click to copy';
+    if (lightboxShareInfiniteBtn) lightboxShareInfiniteBtn.classList.add('hidden');
+  } catch (error) {
+    console.error('Share infinite error:', error);
+    alert(error.message || 'Failed to make share permanent');
   }
 }
 
@@ -2650,7 +2690,7 @@ async function handleShareClick() {
   if (!shareState.currentItem) return;
 
   // Se esiste già un codice valido, ricopia il link
-  if (shareState.currentCode && shareState.expiresAt && Date.now() < shareState.expiresAt) {
+  if (shareState.currentCode && (shareState.expiresAt === null || Date.now() < shareState.expiresAt)) {
     const link = `${window.location.origin}/id-shared/${shareState.currentCode}`;
     try {
       await navigator.clipboard.writeText(link);
@@ -2694,6 +2734,7 @@ async function handleShareClick() {
     // Inizia countdown
     startShareCountdown();
     lightboxShareDeleteBtn.classList.remove('hidden');
+    if (lightboxShareInfiniteBtn) lightboxShareInfiniteBtn.classList.remove('hidden');
   } catch (error) {
     console.error('Share error:', error);
     alert('Failed to create share link');
@@ -3020,6 +3061,7 @@ function closeLightbox() {
 lightboxClose.addEventListener('click', closeLightbox);
 lightboxShareBtn.addEventListener('click', handleShareClick);
 lightboxShareDeleteBtn.addEventListener('click', handleShareDelete);
+if (lightboxShareInfiniteBtn) lightboxShareInfiniteBtn.addEventListener('click', handleShareInfinite);
 lightbox.addEventListener('click', event => {
   if (event.target === lightbox) closeLightbox();
 });
