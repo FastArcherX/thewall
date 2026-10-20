@@ -38,6 +38,186 @@ const reorderState = {
   dragSessionId: 0
 };
 
+/* ── Wall pagination (infinite scroll) ────────────────────────────────────── */
+const PAGE_SIZE = 48;
+const wallPager = {
+  mode: 'wall', // 'wall' | 'shared'
+  sharedCode: null,
+  cursorId: null,
+  hasMore: false,
+  loading: false,
+  allLoaded: false,
+  total: 0,
+  pagedIds: [],
+  filters: { publishers: [], mentions: [] }
+};
+let loadAllPromise = null;
+let sentinelObserver = null;
+let lazyMediaObserver = null;
+let pagerGeneration = 0;
+
+function resetPagerState() {
+  pagerGeneration += 1;
+  Object.assign(wallPager, {
+    cursorId: null,
+    hasMore: true,
+    loading: false,
+    allLoaded: false,
+    total: 0,
+    pagedIds: [],
+    filters: { publishers: [], mentions: [] }
+  });
+  loadAllPromise = null;
+}
+
+function buildPagerQuery(extra) {
+  const params = new URLSearchParams(extra || {});
+  params.set('limit', String(PAGE_SIZE));
+  if (wallPager.cursorId) params.set('after', wallPager.cursorId);
+  return params.toString();
+}
+
+function pagerMetadataUrl(extra) {
+  return wallPager.mode === 'shared'
+    ? `/api/wall-shared/${encodeURIComponent(wallPager.sharedCode)}?${buildPagerQuery(extra)}`
+    : `/api/walls/${encodeURIComponent(currentWallId)}/items?${buildPagerQuery(extra)}`;
+}
+
+async function fetchWallPage(extra) {
+  return api('GET', pagerMetadataUrl(extra));
+}
+
+function appendPagedItems(items) {
+  const appendFn = wallPager.mode === 'shared'
+    ? item => appendSharedItem(item, wallPager.sharedCode)
+    : appendItem;
+  let appended = 0;
+  for (const item of items) {
+    if (mediaGrid.querySelector(`[data-id="${item.id}"]`)) continue;
+    if (wallPager.mode !== 'shared') allWallItems.push(item);
+    appendFn(item);
+    wallPager.pagedIds.push(item.id);
+    appended += 1;
+  }
+  if (items.length > 0) {
+    wallPager.cursorId = items[items.length - 1].id;
+  }
+  return appended;
+}
+
+function applyPageData(data) {
+  wallPager.total = data.total ?? wallPager.total;
+  wallPager.hasMore = Boolean(data.hasMore);
+  if (data.filters) wallPager.filters = data.filters;
+  wallPager.allLoaded = !wallPager.hasMore;
+  const appended = appendPagedItems(data.items || []);
+  updateSentinel();
+  return appended;
+}
+
+async function loadNextPage() {
+  if (wallPager.loading || !wallPager.hasMore) return;
+  const generation = pagerGeneration;
+  wallPager.loading = true;
+  updateSentinel();
+  try {
+    const data = await fetchWallPage();
+    if (generation !== pagerGeneration) return;
+    const appended = applyPageData(data);
+    if (appended > 0 && currentFiltersActive()) applyMediaFilters();
+  } finally {
+    if (generation === pagerGeneration) {
+      wallPager.loading = false;
+      updateSentinel();
+    }
+  }
+}
+
+function sentinelInView() {
+  if (!gridSentinel || gridSentinel.classList.contains('hidden')) return false;
+  const rect = gridSentinel.getBoundingClientRect();
+  return rect.top < window.innerHeight + 800 && rect.bottom > -800;
+}
+
+function loadMoreUntilClear() {
+  if (wallPager.loading || !wallPager.hasMore) return;
+  loadNextPage()
+    .then(() => {
+      if (wallPager.hasMore && sentinelInView()) loadMoreUntilClear();
+    })
+    .catch(error => console.error('Failed to load more items:', error));
+}
+
+function ensureAllItemsLoaded() {
+  if (wallPager.allLoaded) return Promise.resolve();
+  if (loadAllPromise) return loadAllPromise;
+  loadAllPromise = (async () => {
+    try {
+      while (wallPager.hasMore) {
+        await loadNextPage();
+      }
+    } catch (error) {
+      console.error('Failed to load all items:', error);
+    } finally {
+      loadAllPromise = null;
+    }
+  })();
+  return loadAllPromise;
+}
+
+function updateSentinel() {
+  if (!gridSentinel) return;
+  gridSentinel.classList.toggle('hidden', !wallPager.hasMore);
+  gridSentinel.classList.toggle('is-loading', wallPager.loading);
+}
+
+function initSentinelObserver() {
+  if (sentinelObserver || !gridSentinel || !('IntersectionObserver' in window)) return;
+  sentinelObserver = new IntersectionObserver(entries => {
+    if (entries.some(entry => entry.isIntersecting)) loadMoreUntilClear();
+  }, { rootMargin: '800px' });
+  sentinelObserver.observe(gridSentinel);
+}
+
+function removeFromPagerState(itemId) {
+  const idx = wallPager.pagedIds.indexOf(itemId);
+  if (idx !== -1) {
+    wallPager.pagedIds.splice(idx, 1);
+    if (wallPager.cursorId === itemId) {
+      wallPager.cursorId = wallPager.pagedIds[wallPager.pagedIds.length - 1] || null;
+    }
+  }
+  wallPager.total = Math.max(0, wallPager.total - 1);
+}
+
+function getLazyMediaObserver() {
+  if (lazyMediaObserver || !('IntersectionObserver' in window)) return lazyMediaObserver;
+  lazyMediaObserver = new IntersectionObserver(entries => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      attachPendingMedia(entry.target);
+      lazyMediaObserver.unobserve(entry.target);
+    }
+  }, { rootMargin: '600px' });
+  return lazyMediaObserver;
+}
+
+function attachPendingMedia(container) {
+  container.querySelectorAll('video[data-src], audio[data-src]').forEach(el => {
+    el.src = el.dataset.src;
+    delete el.dataset.src;
+  });
+}
+
+function attachLazyMedia(container) {
+  const observer = getLazyMediaObserver();
+  if (!observer) {
+    attachPendingMedia(container);
+    return;
+  }
+  observer.observe(container);
+}
+
 /* ── DOM refs ─────────────────────────────────────────────────────────────── */
 const loginScreen = document.getElementById('login-screen');
 const appScreen = document.getElementById('app-screen');
@@ -80,6 +260,7 @@ const uploadBar = document.getElementById('upload-bar');
 const uploadPercent = document.getElementById('upload-percent');
 const sidebarFooter = document.getElementById('sidebar-footer');
 const mediaGrid = document.getElementById('media-grid');
+const gridSentinel = document.getElementById('grid-sentinel');
 const lightbox = document.getElementById('lightbox');
 const lightboxClose = document.getElementById('lightbox-close');
 const lightboxShareControls = document.getElementById('lightbox-share-controls');
@@ -187,6 +368,14 @@ function applySoundStateToMedia() {
   const muted = !soundEnabled;
   document.querySelectorAll('#media-grid video, #media-grid audio, #lightbox-content video, #lightbox-content audio').forEach(media => {
     media.muted = muted;
+  });
+}
+
+const hasHover = window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+
+function pauseBackgroundMedia() {
+  document.querySelectorAll('#media-grid video, #media-grid audio, #upload-preview video, #upload-preview audio').forEach(el => {
+    el.pause();
   });
 }
 
@@ -438,10 +627,20 @@ function getItemType(mimetype) {
   return 'other';
 }
 
+const THUMBABLE_IMAGE_RE = /\.(jpe?g|png|webp|avif|bmp|svg|tiff?|ico)$/i;
+
+function getItemThumbUrl(item) {
+  if (item.filename && THUMBABLE_IMAGE_RE.test(item.filename)) {
+    return `/thumbs/${encodeURIComponent(item.filename)}`;
+  }
+  if (item.filename) return `/uploads/${encodeURIComponent(item.filename)}`;
+  return item.fileUrl || '';
+}
+
 function syncFiltersFromItems() {
   const items = Array.from(mediaGrid.querySelectorAll('.media-item'));
-  const mentionSet = new Set();
-  const publisherSet = new Set();
+  const mentionSet = new Set(wallPager.filters.mentions || []);
+  const publisherSet = new Set(wallPager.filters.publishers || []);
 
   for (const element of items) {
     const mentions = (element.dataset.mentions || '').split(',').filter(Boolean);
@@ -476,12 +675,24 @@ function syncFiltersFromItems() {
   renderCustomSelectOptions(filterPublisher);
 }
 
+function currentFiltersActive() {
+  return Boolean(
+    searchInput.value.trim() || filterMention.value || filterPublisher.value || filterType.value
+  );
+}
+
 function applyMediaFilters() {
   const term = searchInput.value.trim().toLowerCase();
   const mention = filterMention.value;
   const publisher = filterPublisher.value;
   const type = filterType.value;
   const hasActiveFilters = Boolean(term || mention || publisher || type);
+
+  // Filtering needs every item in the DOM: fetch remaining pages in the
+  // background (metadata only, media stays lazy) and re-apply when done.
+  if (hasActiveFilters && !wallPager.allLoaded) {
+    ensureAllItemsLoaded().then(() => applyMediaFilters());
+  }
 
   mediaGrid.classList.toggle('is-filtering', hasActiveFilters);
 
@@ -672,29 +883,37 @@ function finalizeDragReorder({ persist = true } = {}) {
   }
 }
 
-function persistCurrentItemOrder() {
+async function persistCurrentItemOrder() {
   if (!currentWallId) return;
-  
+  if (wallPager.mode === 'shared') return;
+
   // Get the current order of visible items from the DOM
   const visibleItemIds = Array.from(mediaGrid.querySelectorAll('.media-item')).map(el => el.dataset.id).filter(Boolean);
-  
+
   if (visibleItemIds.length === 0) return;
 
   // Build a Set for quick lookup
   const visibleSet = new Set(visibleItemIds);
-  
-  // Create reordered list: items in DOM order first, then any items not shown
-  const allItemIds = [];
-  
-  // Add visible items in their current DOM order
-  for (const id of visibleItemIds) {
-    allItemIds.push(id);
-  }
-  
-  // Add any items from allWallItems that are not in the DOM (in case any are filtered out)
-  for (const item of allWallItems) {
-    if (!visibleSet.has(item.id)) {
-      allItemIds.push(item.id);
+
+  // Reordered list: items in DOM order first, then any items not shown
+  const allItemIds = [...visibleItemIds];
+
+  if (wallPager.allLoaded) {
+    for (const item of allWallItems) {
+      if (!visibleSet.has(item.id)) allItemIds.push(item.id);
+    }
+  } else {
+    // Only part of the wall is loaded: ask the server for the complete id
+    // list so unloaded items keep their relative order at the tail.
+    try {
+      const data = await api('GET', `/api/walls/${encodeURIComponent(currentWallId)}/items?fields=ids`);
+      for (const id of data.itemIds || []) {
+        if (!visibleSet.has(id)) allItemIds.push(id);
+      }
+    } catch (error) {
+      console.error(error);
+      alert('Unable to save new item order. Refresh and try again.');
+      return;
     }
   }
 
@@ -999,6 +1218,7 @@ async function init() {
   initOperaOverlayBlocker();
   initSoundToggle();
   initCustomFilterSelects();
+  initSentinelObserver();
   // Public read-only shared gallery - no login required
   const sharedMatch = window.location.pathname.match(/^\/wall-shared\/([A-Za-z0-9]+)/);
   if (sharedMatch) {
@@ -1563,15 +1783,16 @@ deleteWallBtn.addEventListener('click', async () => {
 });
 
 async function loadItems() {
+  wallPager.mode = 'wall';
+  wallPager.sharedCode = null;
+  resetPagerState();
   mediaGrid.innerHTML = '';
   allWallItems = [];
+  updateSentinel();
 
   try {
-    const items = await api('GET', `/api/walls/${currentWallId}/items`);
-    allWallItems = items;
-    for (const item of items) {
-      appendItem(item);
-    }
+    const data = await fetchWallPage();
+    applyPageData(data);
     syncFiltersFromItems();
     applyMediaFilters();
   } catch (error) {
@@ -1652,6 +1873,7 @@ async function deleteMultipleItems() {
   }
   
   allWallItems = allWallItems.filter(item => !itemIds.includes(item.id));
+  itemIds.forEach(removeFromPagerState);
   syncFiltersFromItems();
   applyMediaFilters();
   deactivateMultiSelect();
@@ -1684,7 +1906,8 @@ function appendItem(item) {
 
   if (item.mimetype.startsWith('video/')) {
     media = document.createElement('video');
-    media.src = `/uploads/${item.filename}`;
+    media.dataset.src = `/uploads/${item.filename}`;
+    media.preload = 'metadata';
     media.muted = true;
     media.loop = true;
     media.playsInline = true;
@@ -1693,6 +1916,7 @@ function appendItem(item) {
       media.setAttribute('disableremoteplayback', '');
       media.setAttribute('controlslist', 'nodownload nofullscreen noremoteplayback');
     mediaThumb.addEventListener('mouseenter', () => {
+      if (!hasHover) return;
       media.muted = !soundEnabled;
       media.play().catch(() => {});
     });
@@ -1703,7 +1927,7 @@ function appendItem(item) {
     });
   } else if (String(item.mimetype || '').startsWith('audio/')) {
     const audioPreview = document.createElement('audio');
-    audioPreview.src = `/uploads/${item.filename}`;
+    audioPreview.dataset.src = `/uploads/${item.filename}`;
     audioPreview.preload = 'metadata';
     audioPreview.className = 'audio-preview-source';
     audioPreview.muted = !soundEnabled;
@@ -1715,6 +1939,7 @@ function appendItem(item) {
     mediaThumb.appendChild(audioPreview);
 
     mediaThumb.addEventListener('mouseenter', () => {
+      if (!hasHover) return;
       audioPreview.muted = !soundEnabled;
       audioPreview.currentTime = 0;
       audioPreview.play().catch(() => {});
@@ -1725,13 +1950,15 @@ function appendItem(item) {
     });
   } else {
     media = document.createElement('img');
-    media.src = `/uploads/${item.filename}`;
+    media.src = getItemThumbUrl(item);
     media.alt = item.caption || item.originalName;
     media.loading = 'lazy';
+    media.decoding = 'async';
     media.draggable = false;
   }
 
   mediaThumb.appendChild(media);
+  attachLazyMedia(mediaThumb);
   const thumbShield = document.createElement('div');
   thumbShield.className = 'media-thumb-shield';
   mediaThumb.appendChild(thumbShield);
@@ -1866,6 +2093,7 @@ async function toggleFavourite(item, element, button) {
       favouriteRefSet.delete(key);
       if (isFavouritesWall()) {
         element.remove();
+        removeFromPagerState(element.dataset.id);
         allWallItems = allWallItems.filter(entry => {
           const entrySourceWallId = entry.sourceWallId || currentWallId;
           const entrySourceItemId = entry.sourceItemId || entry.id;
@@ -1926,6 +2154,7 @@ async function deleteItem(itemId, element) {
     favouriteRefSet.delete(getFavouriteRefKey(currentWallId, itemId));
     allWallItems = allWallItems.filter(item => item.id !== itemId);
     element.remove();
+    removeFromPagerState(itemId);
     syncFiltersFromItems();
     applyMediaFilters();
   } catch (error) {
@@ -2190,6 +2419,7 @@ function renderUploadPreview() {
 }
 
 function openTempPreview(entry) {
+  pauseBackgroundMedia();
   lightboxContent.innerHTML = '';
   lightboxShareControls.classList.add('hidden');
   lightboxShareDeleteBtn.classList.add('hidden');
@@ -2202,6 +2432,7 @@ function openTempPreview(entry) {
     media.src = entry.previewUrl;
     media.controls = true;
     media.autoplay = true;
+    media.playsInline = true;
     media.muted = !soundEnabled;
   } else if (type.startsWith('audio/')) {
     media = document.createElement('audio');
@@ -2269,6 +2500,7 @@ undoBtn.addEventListener('click', async () => {
   }
   
   allWallItems = allWallItems.filter(item => !itemIds.includes(item.id));
+  itemIds.forEach(removeFromPagerState);
   syncFiltersFromItems();
   applyMediaFilters();
 });
@@ -2336,6 +2568,8 @@ uploadBtn.addEventListener('click', async () => {
       allWallItems.push(item);
       lastUploadedItemIds.push(item.id);
       appendItem(item);
+      wallPager.pagedIds.push(item.id);
+      wallPager.total += 1;
       syncFiltersFromItems();
       applyMediaFilters();
       const percentage = uploadState.totalBytes > 0
@@ -2472,6 +2706,7 @@ document.addEventListener('dragend', () => {
 });
 
 function openLightbox(item) {
+  pauseBackgroundMedia();
   lightboxContent.innerHTML = '';
   lightboxShareControls.classList.remove('hidden');
   shareState.currentItem = item;
@@ -2491,7 +2726,7 @@ function openLightbox(item) {
          shareState.currentCode = data.code;
          shareState.expiresAt = data.expiresAt;
          if (data.expiresAt === null) {
-           lightboxShareBtn.innerHTML = '<i class="fa-solid fa-link"></i><span>∞</span>';
+           lightboxShareBtn.innerHTML = '<i class="fa-solid fa-link"></i><i class="fa-solid fa-infinity"></i>';
            lightboxShareBtn.title = 'Permanent share link - click to copy';
          } else {
            startShareCountdown();
@@ -2521,6 +2756,7 @@ function openLightbox(item) {
     media.src = `/uploads/${item.filename}`;
     media.controls = true;
     media.autoplay = true;
+    media.playsInline = true;
     media.muted = !soundEnabled;
   } else if (String(item.mimetype || '').startsWith('audio/')) {
     media = document.createElement('audio');
@@ -2601,7 +2837,7 @@ function showEveryoneNotification(isEveryoneAdded) {
 
 function updateShareButtonCountdown() {
   if (shareState.expiresAt === null && shareState.currentCode) {
-    lightboxShareBtn.innerHTML = '<i class="fa-solid fa-link"></i><span>∞</span>';
+    lightboxShareBtn.innerHTML = '<i class="fa-solid fa-link"></i><i class="fa-solid fa-infinity"></i>';
     lightboxShareBtn.title = 'Permanent share link - click to copy';
     if (lightboxShareInfiniteBtn) lightboxShareInfiniteBtn.classList.add('hidden');
     return;
@@ -2677,7 +2913,7 @@ async function handleShareInfinite() {
       clearInterval(shareState.countdownInterval);
       shareState.countdownInterval = null;
     }
-    lightboxShareBtn.innerHTML = '<i class="fa-solid fa-link"></i><span>∞</span>';
+    lightboxShareBtn.innerHTML = '<i class="fa-solid fa-link"></i><i class="fa-solid fa-infinity"></i>';
     lightboxShareBtn.title = 'Permanent share link - click to copy';
     if (lightboxShareInfiniteBtn) lightboxShareInfiniteBtn.classList.add('hidden');
   } catch (error) {
@@ -2900,14 +3136,14 @@ function appendSharedItem(item, code) {
   const fileUrl = item.fileUrl || `/wall-shared/${encodeURIComponent(code)}/file/${encodeURIComponent(item.id)}`;
   if (String(item.mimetype || '').startsWith('video/')) {
     media = document.createElement('video');
-    media.src = fileUrl;
+    media.dataset.src = fileUrl;
     media.muted = true;
     media.loop = true;
     media.playsInline = true;
     media.preload = 'metadata';
     media.draggable = false;
     media.setAttribute('controlslist', 'nodownload nofullscreen noremoteplayback');
-    mediaThumb.addEventListener('mouseenter', () => { media.play().catch(() => {}); });
+    mediaThumb.addEventListener('mouseenter', () => { if (hasHover) media.play().catch(() => {}); });
     mediaThumb.addEventListener('mouseleave', () => { media.pause(); media.currentTime = 0; });
   } else if (String(item.mimetype || '').startsWith('audio/')) {
     media = document.createElement('div');
@@ -2916,13 +3152,15 @@ function appendSharedItem(item, code) {
     mediaThumb.classList.add('media-thumb-audio');
   } else {
     media = document.createElement('img');
-    media.src = fileUrl;
+    media.src = item.filename ? getItemThumbUrl(item) : fileUrl;
     media.alt = item.caption || item.originalName;
     media.loading = 'lazy';
+    media.decoding = 'async';
     media.draggable = false;
   }
 
   mediaThumb.appendChild(media);
+  attachLazyMedia(mediaThumb);
   const thumbShield = document.createElement('div');
   thumbShield.className = 'media-thumb-shield';
   mediaThumb.appendChild(thumbShield);
@@ -2979,6 +3217,7 @@ function appendSharedItem(item, code) {
 }
 
 function openSharedPreview(item, code) {
+  pauseBackgroundMedia();
   const fileUrl = item.fileUrl || `/wall-shared/${encodeURIComponent(code)}/file/${encodeURIComponent(item.id)}`;
   lightboxContent.innerHTML = '';
   lightboxShareControls.classList.add('hidden');
@@ -3016,24 +3255,27 @@ async function showSharedWall(code) {
   wallView.classList.remove('hidden');
   mediaGrid.innerHTML = '';
 
+  wallPager.mode = 'shared';
+  wallPager.sharedCode = code;
+  resetPagerState();
+  updateSentinel();
+
   let data;
   try {
-    const response = await fetch(`/api/wall-shared/${encodeURIComponent(code)}`);
-    if (!response.ok) throw new Error('not found');
-    data = await response.json();
+    data = await fetchWallPage();
   } catch {
+    wallPager.hasMore = false;
+    updateSentinel();
     wallTitle.textContent = '🔗 Shared wall';
     wallMeta.textContent = 'This link is invalid or has expired.';
     return;
   }
 
-  const count = (data.items || []).length;
+  applyPageData(data);
+
+  const count = wallPager.total;
   wallTitle.textContent = `${data.wall.icon || '🧱'} ${data.wall.name}`;
   wallMeta.textContent = `Shared read-only gallery · by ${data.wall.owner} · ${count} item${count === 1 ? '' : 's'}`;
-
-  for (const item of data.items || []) {
-    appendSharedItem(item, code);
-  }
 
   // Enable search + filters on the shared gallery (read-only)
   searchInput.value = '';

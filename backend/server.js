@@ -6,6 +6,7 @@ const path = require('path');
 const fs = require('fs');
 const readline = require('readline');
 const ExifParser = require('exif-parser');
+const sharp = require('sharp');
 const { v4: uuidv4 } = require('uuid');
 const { loadDB, saveDB } = require('./db');
 const { executeCommand, printHelp, tokenizeCommand } = require('./cli');
@@ -95,6 +96,61 @@ try {
 const UPLOADS_DIR = path.join(__dirname, '..', 'uploads');
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
+const THUMBS_DIR = path.join(UPLOADS_DIR, 'thumbs');
+if (!fs.existsSync(THUMBS_DIR)) fs.mkdirSync(THUMBS_DIR, { recursive: true });
+
+const THUMB_IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.avif', '.bmp', '.svg', '.tif', '.tiff', '.ico']);
+
+function isThumbableImage(filename) {
+  return THUMB_IMAGE_EXTENSIONS.has(path.extname(filename).toLowerCase());
+}
+
+function removeThumbFor(filename) {
+  try {
+    const thumbPath = path.join(THUMBS_DIR, `${filename}.webp`);
+    if (fs.existsSync(thumbPath)) fs.unlinkSync(thumbPath);
+  } catch (err) {
+    console.error('Failed to remove thumbnail:', err);
+  }
+}
+
+function extractMentionTags(value) {
+  const matches = String(value || '').match(/@([\w.-]+)/g) || [];
+  return matches.map(match => match.slice(1).toLowerCase());
+}
+
+function buildWallFilters(items) {
+  const publishers = new Set();
+  const mentions = new Set();
+  for (const item of items) {
+    if (item.uploadedBy) publishers.add(item.uploadedBy);
+    for (const tag of extractMentionTags(item.caption)) mentions.add(tag);
+  }
+  return {
+    publishers: Array.from(publishers),
+    mentions: Array.from(mentions)
+  };
+}
+
+// Cursor pagination: slice a list after the given item id (falls back to the
+// head when the cursor no longer exists, e.g. deleted mid-scroll).
+function paginateById(list, after, limit) {
+  let start = 0;
+  if (after) {
+    const idx = list.findIndex(entry => entry.id === after);
+    start = idx === -1 ? 0 : idx + 1;
+  }
+  const items = limit > 0 ? list.slice(start, start + limit) : list.slice(start);
+  return { items, hasMore: start + items.length < list.length };
+}
+
+function parsePaginationQuery(req) {
+  const limitRaw = parseInt(req.query.limit, 10);
+  const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 200) : 0;
+  const after = typeof req.query.after === 'string' && req.query.after ? req.query.after : null;
+  return { limit, after };
+}
+
 // Multer storage - preserve original extension
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, UPLOADS_DIR),
@@ -118,6 +174,38 @@ app.use(express.json({ limit: '2gb' }));
 app.use(express.urlencoded({ extended: true, limit: '2gb' }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
 app.use('/uploads', express.static(UPLOADS_DIR));
+
+// On-demand image thumbnails (webp, generated once then cached forever)
+app.get('/thumbs/:filename', async (req, res) => {
+  const filename = path.basename(req.params.filename);
+  if (!isThumbableImage(filename)) {
+    return res.redirect(302, `/uploads/${encodeURIComponent(filename)}`);
+  }
+
+  const originalPath = path.join(UPLOADS_DIR, filename);
+  const thumbPath = path.join(THUMBS_DIR, `${filename}.webp`);
+
+  if (fs.existsSync(thumbPath)) {
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    return res.sendFile(thumbPath);
+  }
+  if (!fs.existsSync(originalPath)) {
+    return res.status(404).json({ error: 'File not found' });
+  }
+
+  try {
+    await sharp(originalPath, { failOn: 'none' })
+      .rotate()
+      .resize({ width: 480, height: 480, fit: 'inside', withoutEnlargement: true })
+      .webp({ quality: 75 })
+      .toFile(thumbPath);
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.sendFile(thumbPath);
+  } catch (err) {
+    console.error('Thumbnail generation failed:', filename, err.message);
+    res.redirect(302, `/uploads/${encodeURIComponent(filename)}`);
+  }
+});
 
 app.use(session({
   secret: 'thewall-secret-key-2026',
@@ -602,6 +690,7 @@ app.delete('/api/walls/:wallId', requireAuth, (req, res) => {
   db.walls[idx].items.forEach(item => {
     const filePath = path.join(UPLOADS_DIR, item.filename);
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    removeThumbFor(item.filename);
   });
   db.favourites.forEach(entry => {
     entry.items = entry.items.filter(ref => ref.wallId !== req.params.wallId);
@@ -733,6 +822,9 @@ app.delete('/api/favourites', requireAuth, (req, res) => {
 app.get('/api/walls/:wallId/items', requireAuth, (req, res) => {
   const db = loadDB();
   const everyoneRefSet = getEveryoneRefSet(db);
+  const isFirstPage = !req.query.after;
+  const fieldsOnly = req.query.fields === 'ids';
+  const { limit, after } = parsePaginationQuery(req);
 
   if (isUserFavouritesWallId(req.params.wallId, req.session.user.name)) {
     const entry = ensureUserFavouritesEntry(db, req.session.user.name);
@@ -757,7 +849,14 @@ app.get('/api/walls/:wallId/items', requireAuth, (req, res) => {
       saveDB(db);
     }
 
-    return res.json(mapped);
+    if (fieldsOnly) {
+      return res.json({ itemIds: mapped.map(item => item.id), total: mapped.length });
+    }
+
+    const page = paginateById(mapped, after, limit);
+    const payload = { items: page.items, total: mapped.length, hasMore: page.hasMore };
+    if (isFirstPage) payload.filters = buildWallFilters(mapped);
+    return res.json(payload);
   }
 
   const wall = getWallById(db, req.params.wallId);
@@ -766,7 +865,7 @@ app.get('/api/walls/:wallId/items', requireAuth, (req, res) => {
     return res.status(403).json({ error: 'Access denied to this wall' });
   }
 
-  if (clearWallPings(db, req.session.user.name, wall.id)) {
+  if (isFirstPage && clearWallPings(db, req.session.user.name, wall.id)) {
     saveDB(db);
   }
 
@@ -778,7 +877,14 @@ app.get('/api/walls/:wallId/items', requireAuth, (req, res) => {
     isEveryone: wall.id === EVERYONE_WALL_ID ? true : everyoneRefSet.has(`${wall.id}::${item.id}`)
   }));
 
-  res.json(items);
+  if (fieldsOnly) {
+    return res.json({ itemIds: items.map(item => item.id), total: items.length });
+  }
+
+  const page = paginateById(items, after, limit);
+  const payload = { items: page.items, total: items.length, hasMore: page.hasMore };
+  if (isFirstPage) payload.filters = buildWallFilters(items);
+  res.json(payload);
 });
 
 app.post('/api/everyone', requireAuth, (req, res) => {
@@ -1042,6 +1148,7 @@ app.delete('/api/walls/:wallId/items/:itemId', requireAuth, (req, res) => {
 
   const filePath = path.join(UPLOADS_DIR, item.filename);
   if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+  removeThumbFor(item.filename);
   db.favourites.forEach(entry => {
     entry.items = entry.items.filter(ref => !(ref.wallId === req.params.wallId && ref.itemId === req.params.itemId));
   });
@@ -1351,7 +1458,28 @@ app.get('/api/wall-shared/:code', (req, res) => {
   const wall = getWallById(db, info.wallId);
   if (!wall) return res.status(404).json({ error: 'Wall not found' });
 
-  res.json({
+  const mapped = (wall.items || []).map(item => ({
+    id: item.id,
+    filename: item.filename,
+    originalName: item.originalName || item.filename,
+    mimetype: item.mimetype || 'application/octet-stream',
+    caption: item.caption || '',
+    uploadedAt: item.uploadedAt || null,
+    uploadedBy: item.uploadedBy || 'Unknown',
+    exifDate: item.exifDate || null,
+    fileUrl: `/wall-shared/${req.params.code}/file/${item.id}`
+  }));
+
+  const isFirstPage = !req.query.after;
+  const fieldsOnly = req.query.fields === 'ids';
+  const { limit, after } = parsePaginationQuery(req);
+
+  if (fieldsOnly) {
+    return res.json({ itemIds: mapped.map(item => item.id), total: mapped.length });
+  }
+
+  const page = paginateById(mapped, after, limit);
+  const payload = {
     wall: {
       id: wall.id,
       name: wall.name,
@@ -1359,17 +1487,12 @@ app.get('/api/wall-shared/:code', (req, res) => {
       owner: wall.owner,
       createdAt: wall.createdAt
     },
-    items: (wall.items || []).map(item => ({
-      id: item.id,
-      originalName: item.originalName || item.filename,
-      mimetype: item.mimetype || 'application/octet-stream',
-      caption: item.caption || '',
-      uploadedAt: item.uploadedAt || null,
-      uploadedBy: item.uploadedBy || 'Unknown',
-      exifDate: item.exifDate || null,
-      fileUrl: `/wall-shared/${req.params.code}/file/${item.id}`
-    }))
-  });
+    items: page.items,
+    total: mapped.length,
+    hasMore: page.hasMore
+  };
+  if (isFirstPage) payload.filters = buildWallFilters(mapped);
+  res.json(payload);
 });
 
 // Public read-only file serving for a shared wall (no auth)
